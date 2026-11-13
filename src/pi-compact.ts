@@ -1,11 +1,23 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { SelectItem } from "@earendil-works/pi-tui";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { registerCompactionHook, resolveModel } from "./compaction.js";
+import { pickModel } from "./picker.js";
 import { loadPromptOverride, PROMPT_OVERRIDE_PATH } from "./prompt.js";
 import { readConfig } from "./settings.js";
+import { savePermanentModel } from "./settings-write.js";
 
 type NotifyLevel = "info" | "warning" | "error";
 
-const OFF_ITEM = "off — pi default compaction";
+const OFF_ITEM = "off";
+const OFF_LABEL = "off — pi default compaction";
+const PROMPT_EDITOR_TITLE = "pi-compact prompt override";
+const PROMPT_TEMPLATE =
+	"<!-- pi-compact prompt override.\n" +
+	"     Replaces pi's native compaction prompt entirely for the configured model.\n" +
+	"     Saving an empty file falls back to the native prompt (a warning notifies you). -->\n\n";
 
 /**
  * Model specs offered by the picker: session-scoped models when the session has
@@ -19,28 +31,41 @@ function pickerModelSpecs(ctx: { scopedModels: readonly { model: { provider: str
 /**
  * pi-compact entry point.
  *
- * The hook intercepts compaction; this extension only adds a `/pi-compact`
- * command to inspect status and set a per-session model override.
+ * The hook intercepts compaction; this extension adds a `/pi-compact` command
+ * to pick the session model, edit the prompt override, and disable interception.
  */
 export default function (
 	pi: ExtensionAPI,
-	opts?: { promptOverridePath?: string; retryDelaysMs?: number[] },
+	opts?: { promptOverridePath?: string; retryDelaysMs?: number[]; agentDir?: string },
 ) {
 	// Session runtime override: undefined = follow settings compaction.model,
 	// "" = off (pi's default compaction), otherwise "provider/modelId".
 	let runtimeModel: string | undefined;
+	const promptPath = opts?.promptOverridePath ?? PROMPT_OVERRIDE_PATH;
+	const agentDir = opts?.agentDir ?? getAgentDir();
 
 	pi.on("session_start", () => {
 		runtimeModel = undefined;
 	});
 
 	registerCompactionHook(pi, () => runtimeModel, {
-		promptOverridePath: opts?.promptOverridePath,
+		promptOverridePath: promptPath,
 		retryDelaysMs: opts?.retryDelaysMs,
 	});
 
 	pi.registerCommand("pi-compact", {
-		description: "Configure pi-compact compaction model",
+		description: "Configure pi-compact compaction model and prompt",
+		// Only subcommands are completed here; model specs are offered by the
+		// picker, which has registry access via the command context.
+		getArgumentCompletions: (prefix) => {
+			const items = [
+				{ value: "model", label: "model", description: "pick the compaction model" },
+				{ value: "prompt", label: "prompt", description: "edit the prompt override" },
+				{ value: "off", label: "off", description: "use pi's default compaction" },
+			];
+			const remaining = items.filter((item) => item.value.startsWith(prefix));
+			return remaining.length > 0 ? remaining : null;
+		},
 		handler: async (args, ctx) => {
 			const say = (msg: string, level: NotifyLevel = "info") => {
 				if (ctx.hasUI) ctx.ui.notify(msg, level);
@@ -49,17 +74,15 @@ export default function (
 
 			const trimmed = args.trim();
 
-			if (trimmed === "") {
+			if (trimmed === "" || trimmed === "model") {
 				const { config, warnings } = readConfig(pi.getSettings());
 				for (const warning of warnings) say(warning, "warning");
 				const configured = config.model;
 				const current = runtimeModel === "" ? "off (default compaction)" : runtimeModel || configured || "not configured";
 
-				const override = await loadPromptOverride(opts?.promptOverridePath);
+				const override = await loadPromptOverride(promptPath);
 				if (override.warning) say(override.warning, "warning");
-				else if (override.text) {
-					say(`pi-compact prompt: override file (${opts?.promptOverridePath ?? PROMPT_OVERRIDE_PATH})`, "info");
-				}
+				else if (override.text) say(`pi-compact prompt: override file (${promptPath})`, "info");
 				else say("pi-compact prompt: native", "info");
 
 				if (!ctx.hasUI) {
@@ -69,22 +92,71 @@ export default function (
 
 				// Interactive: a picker mirroring pi's model list; Esc/cancel keeps
 				// the current state. The title carries the model status.
-				const items = pickerModelSpecs(ctx).map((spec) => (spec === (runtimeModel || configured) ? `● ${spec}` : spec));
-				items.push(runtimeModel === "" ? `● ${OFF_ITEM}` : OFF_ITEM);
-				const choice = await ctx.ui.select(`pi-compact compaction model — current: ${current}`, items);
+				const active = runtimeModel || configured;
+				const items: SelectItem[] = pickerModelSpecs(ctx).map((spec) => ({
+					value: spec,
+					label: spec === active && runtimeModel !== "" ? `${spec} (active)` : spec,
+				}));
+				items.push({ value: OFF_ITEM, label: runtimeModel === "" ? `${OFF_LABEL} (active)` : OFF_LABEL });
+				const choice = await pickModel(ctx, items, `pi-compact compaction model — current: ${current}`);
 				if (choice === undefined) return;
-				const spec = choice.replace(/^● /, "");
-				if (spec.startsWith("off")) {
+
+				if (choice.permanent) {
+					const result = savePermanentModel(choice.spec === OFF_ITEM ? "" : choice.spec, agentDir);
+					if (!result.ok) {
+						say(`pi-compact: ${result.error}`, "error");
+						return;
+					}
+				}
+
+				if (choice.spec === OFF_ITEM) {
 					runtimeModel = "";
-					say("pi-compact disabled for this session (default compaction)", "info");
+					say(
+						choice.permanent
+							? "pi-compact disabled (settings updated; default compaction)"
+							: "pi-compact disabled for this session (default compaction)",
+						"info",
+					);
 					return;
 				}
-				if (!resolveModel(spec, ctx.modelRegistry)) {
-					say(`pi-compact: model "${spec}" not found`, "error");
+
+				if (!resolveModel(choice.spec, ctx.modelRegistry)) {
+					say(`pi-compact: model "${choice.spec}" not found`, "error");
 					return;
 				}
-				runtimeModel = spec;
-				say(`pi-compact will use ${spec} for this session`, "info");
+				runtimeModel = choice.spec;
+				say(
+					choice.permanent
+						? `pi-compact will use ${choice.spec} (saved to settings, applies immediately)`
+						: `pi-compact will use ${choice.spec} for this session`,
+					"info",
+					);
+				return;
+			}
+
+			if (trimmed === "prompt") {
+				if (!ctx.hasUI) {
+					console.log(`pi-compact prompt: editing requires an interactive UI; edit ${promptPath} directly`);
+					return;
+				}
+				let existing: string | undefined;
+				try {
+					existing = readFileSync(promptPath, "utf-8");
+				} catch {
+					existing = undefined; // Missing or unreadable: start from the template.
+				}
+				const text = await ctx.ui.editor(PROMPT_EDITOR_TITLE, existing ?? PROMPT_TEMPLATE);
+				if (text === undefined) {
+					ctx.ui.notify("pi-compact prompt: cancelled — file unchanged", "info");
+					return;
+				}
+				mkdirSync(dirname(promptPath), { recursive: true });
+				writeFileSync(promptPath, text, "utf-8");
+				if (text.trim() === "") {
+					ctx.ui.notify(`pi-compact prompt: saved ${promptPath} — blank override is ignored; the native prompt is used`, "warning");
+				} else {
+					ctx.ui.notify(`pi-compact prompt: saved ${promptPath} — applies on the next compaction`, "info");
+				}
 				return;
 			}
 

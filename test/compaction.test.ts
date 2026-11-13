@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { describe, it } from "node:test";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { registerCompactionHook } from "../src/compaction.js";
 import defaultExtension from "../src/pi-compact.js";
+import { savePermanentModel } from "../src/settings-write.js";
 import { SUMMARIZATION_PROMPT, SUMMARIZATION_SYSTEM_PROMPT } from "../src/prompt.js";
 import {
 	commandHandler,
@@ -21,6 +23,12 @@ import {
 const CONFIGURED = { compaction: { model: "prov/mdl" } };
 /** Never exists, so tests never read a real ~/.pi/agent/extensions/pi-compact.md. */
 const MISSING_OVERRIDE = join(tmpdir(), `pi-compact-missing-${process.pid}`, "pi-compact.md");
+/** Scratch path for `/pi-compact prompt` save tests; tests clear it before use. */
+const PROMPT_DIR = join(tmpdir(), `pi-compact-prompt-${process.pid}`);
+const PROMPT_PATH = join(PROMPT_DIR, "override.md");
+/** Scratch agent dir for permanent-save tests; tests clear it before use. */
+const AGENT_DIR = join(tmpdir(), `pi-compact-agent-${process.pid}`);
+const SETTINGS_PATH = join(AGENT_DIR, "settings.json");
 
 function notifiedWith(state: FakeCtxState, pattern: RegExp): boolean {
 	return state.notifications.some((notification) => pattern.test(notification.message));
@@ -316,29 +324,29 @@ describe("session_before_compact handler", () => {
 });
 
 describe("/pi-compact command", () => {
-	function setupCommand(settings: unknown) {
+	function setupCommand(settings: unknown, ctxOptions: FakeCtxOptions = {}, promptPath = MISSING_OVERRIDE, agentDir?: string) {
 		const { pi, handlers, commands } = fakePi({ settings });
-		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		defaultExtension(pi, { promptOverridePath: promptPath, agentDir });
 		const run = commandHandler(commands, "pi-compact");
-		const { ctx, state } = fakeCtx({ model: { reasoning: false } });
+		const { ctx, state } = fakeCtx({ model: { reasoning: false }, ...ctxOptions });
 		return {
 			run: (args: string) => run(args, ctx as unknown as ExtensionCommandContext),
 			handler: compactHandler(handlers),
+			commands,
 			ctx,
 			state,
 		};
 	}
 
 	it("opens the model picker with the model status in its title", async () => {
-		const { run, state } = setupCommand({});
+		const { run, state } = setupCommand({}, { customKeys: ["\x1b"] });
 
 		await run("");
 
 		// The prompt-status line is still notified; the model status moved into the title.
 		assert.ok(notifiedWith(state, /prompt: native/));
-		assert.equal(state.selectCalls.length, 1);
-		assert.match(state.selectCalls[0].title, /not configured/);
-		assert.deepEqual(state.selectCalls[0].items, ["off — pi default compaction"]);
+		assert.equal(state.customCalls.length, 1);
+		assert.match(state.customCalls[0].render(100).join("\n"), /not configured/);
 		// Cancelling the picker leaves no state change.
 		assert.equal(state.streamCalls.length, 0);
 	});
@@ -360,7 +368,7 @@ describe("/pi-compact command", () => {
 		}
 
 		assert.deepEqual(state.notifications, []);
-		assert.deepEqual(state.selectCalls, []);
+		assert.deepEqual(state.customCalls, []);
 		assert.ok(logged.some((line) => /not configured/.test(line)));
 		assert.ok(logged.some((line) => /prompt: native/.test(line)));
 	});
@@ -375,13 +383,16 @@ describe("/pi-compact command", () => {
 				{ model: { provider: "prov", id: "mdl" } },
 				{ model: { provider: "other", id: "m2" } },
 			],
-			select: (_title, items) => items[0],
+			customKeys: ["\r"],
 		});
 
 		await run("", ctx as unknown as ExtensionCommandContext);
 
-		assert.deepEqual(state.selectCalls[0].items, ["prov/mdl", "other/m2", "off — pi default compaction"]);
-		assert.ok(notifiedWith(state, /will use prov\/mdl/));
+		const rendered = state.customCalls[0].render(100).join("\n");
+		assert.match(rendered, /prov\/mdl/);
+		assert.match(rendered, /other\/m2/);
+		assert.match(rendered, /off — pi default compaction/);
+		assert.ok(notifiedWith(state, /will use prov\/mdl for this session/));
 
 		// The selection intercepts the next compaction.
 		const result = await compactHandler(handlers)(compactEvent(), ctx);
@@ -396,12 +407,14 @@ describe("/pi-compact command", () => {
 		const { ctx, state } = fakeCtx({
 			model: { reasoning: false },
 			scopedModels: [{ model: { provider: "prov", id: "mdl" } }],
-			select: (_title, items) => items[items.length - 1],
+			customKeys: ["\x1b[B", "\r"],
 		});
 
 		await run("", ctx as unknown as ExtensionCommandContext);
 
-		assert.deepEqual(state.selectCalls[0].items, ["● prov/mdl", "off — pi default compaction"]);
+		// "prov/mdl" is active (settings model) and the off entry is selectable.
+		const rendered = state.customCalls[0].render(100).join("\n");
+		assert.match(rendered, /prov\/mdl \(active\)/);
 		assert.ok(notifiedWith(state, /disabled for this session/));
 		assert.equal(await compactHandler(handlers)(compactEvent(), ctx), undefined);
 		assert.equal(state.streamCalls.length, 0);
@@ -461,6 +474,142 @@ describe("/pi-compact command", () => {
 		assert.equal(accepted.state.streamCalls.length, 1);
 		assert.deepEqual(accepted.state.findCalls, [{ provider: "prov", modelId: "mdl" }]);
 	});
+
+	it("ctrl+s saves the selection to settings and applies this session", async () => {
+		rmSync(AGENT_DIR, { recursive: true, force: true });
+		mkdirSync(AGENT_DIR, { recursive: true });
+		const { run, handler, ctx, state } = setupCommand(
+			{},
+			{ scopedModels: [{ model: { provider: "prov", id: "mdl" } }, { model: { provider: "other", id: "m2" } }], customKeys: ["\x13"] },
+			MISSING_OVERRIDE,
+			AGENT_DIR,
+		);
+
+		await run("");
+
+		assert.deepEqual(JSON.parse(readFileSync(SETTINGS_PATH, "utf-8")), { compaction: { model: "prov/mdl" } });
+		assert.ok(notifiedWith(state, /will use prov\/mdl \(saved to settings/));
+
+		// Applies to the current session immediately.
+		const result = await handler(compactEvent(), ctx);
+		assert.ok(result?.compaction);
+		assert.deepEqual(state.findCalls.at(-1), { provider: "prov", modelId: "mdl" });
+	});
+
+	it("ctrl+s on the off entry removes compaction.model from settings", async () => {
+		rmSync(AGENT_DIR, { recursive: true, force: true });
+		mkdirSync(AGENT_DIR, { recursive: true });
+		writeFileSync(SETTINGS_PATH, JSON.stringify({ defaultModel: "keep", compaction: { reserveTokens: 100, model: "prov/mdl" } }), "utf-8");
+		const { run, handler, ctx, state } = setupCommand(
+			CONFIGURED,
+			{ scopedModels: [{ model: { provider: "prov", id: "mdl" } }], customKeys: ["\x1b[B", "\x13"] },
+			MISSING_OVERRIDE,
+			AGENT_DIR,
+		);
+
+		await run("");
+
+		// Only compaction.model is removed; sibling keys are preserved.
+		assert.deepEqual(JSON.parse(readFileSync(SETTINGS_PATH, "utf-8")), { defaultModel: "keep", compaction: { reserveTokens: 100 } });
+		assert.ok(notifiedWith(state, /disabled \(settings updated/));
+
+		// Session is off: settings never intercept.
+		assert.equal(await handler(compactEvent(), ctx), undefined);
+		assert.equal(state.streamCalls.length, 0);
+	});
+
+	it("reports an error when the settings file is malformed", async () => {
+		rmSync(AGENT_DIR, { recursive: true, force: true });
+		mkdirSync(AGENT_DIR, { recursive: true });
+		writeFileSync(SETTINGS_PATH, "{not json", "utf-8");
+		const { run, handler, ctx, state } = setupCommand(
+			{},
+			{ scopedModels: [{ model: { provider: "prov", id: "mdl" } }], customKeys: ["\x13"] },
+			MISSING_OVERRIDE,
+			AGENT_DIR,
+		);
+
+		await run("");
+
+		assert.ok(notifiedWith(state, /could not read .*settings\.json/));
+		assert.equal(state.notifications.find((n) => /could not read/.test(n.message))?.level, "error");
+		// Nothing was set: no session override, no compaction interception.
+		assert.equal(await handler(compactEvent(), ctx), undefined);
+		assert.equal(state.streamCalls.length, 0);
+	});
+
+	it("completes the subcommands", () => {
+		const { commands } = setupCommand({});
+		const completions = commands.get("pi-compact")?.getArgumentCompletions?.("");
+
+		assert.deepEqual(
+			completions?.map((item) => item.value),
+			["model", "prompt", "off"],
+		);
+		// No match yields no completions.
+		assert.equal(commands.get("pi-compact")?.getArgumentCompletions?.("zzz"), null);
+	});
+
+	it("opens the picker on the model subcommand", async () => {
+		const { run, state } = setupCommand(
+			{},
+			{ scopedModels: [{ model: { provider: "prov", id: "mdl" } }], customKeys: ["\x1b"] },
+		);
+
+		await run("model");
+
+		assert.equal(state.customCalls.length, 1);
+		const rendered = state.customCalls[0].render(100).join("\n");
+		assert.match(rendered, /prov\/mdl/);
+		assert.match(rendered, /off — pi default compaction/);
+	});
+
+	it("prompt opens the editor with a template and saves the result", async () => {
+		rmSync(PROMPT_DIR, { recursive: true, force: true });
+		const { run, state } = setupCommand({}, { editor: (_title, prefill) => prefill?.replace("-->", "edited -->") }, PROMPT_PATH);
+
+		await run("prompt");
+
+		assert.equal(state.editorCalls.length, 1);
+		assert.match(state.editorCalls[0].prefill ?? "", /pi-compact prompt override/);
+		assert.ok(existsSync(PROMPT_PATH), "override file written");
+		assert.match(readFileSync(PROMPT_PATH, "utf-8"), /edited -->/);
+		assert.ok(notifiedWith(state, /saved .*applies on the next compaction/));
+	});
+
+	it("prompt prefills the existing file and saves edits", async () => {
+		mkdirSync(PROMPT_DIR, { recursive: true });
+		writeFileSync(PROMPT_PATH, "existing prompt", "utf-8");
+		const { run, state } = setupCommand({}, { editor: () => "existing prompt, edited" }, PROMPT_PATH);
+
+		await run("prompt");
+
+		assert.equal(state.editorCalls[0].prefill, "existing prompt");
+		assert.equal(readFileSync(PROMPT_PATH, "utf-8"), "existing prompt, edited");
+		assert.ok(notifiedWith(state, /saved/));
+	});
+
+	it("prompt warns when the saved override is blank", async () => {
+		rmSync(PROMPT_DIR, { recursive: true, force: true });
+		const { run, state } = setupCommand({}, { editor: () => "   " }, PROMPT_PATH);
+
+		await run("prompt");
+
+		assert.ok(existsSync(PROMPT_PATH));
+		assert.ok(notifiedWith(state, /blank override is ignored/));
+		assert.equal(state.notifications.find((n) => /blank/.test(n.message))?.level, "warning");
+	});
+
+	it("prompt cancel writes nothing", async () => {
+		rmSync(PROMPT_DIR, { recursive: true, force: true });
+		const { run, state } = setupCommand({}, {}, PROMPT_PATH);
+
+		await run("prompt");
+
+		assert.equal(state.editorCalls.length, 1);
+		assert.ok(!existsSync(PROMPT_PATH), "no file written on cancel");
+		assert.ok(notifiedWith(state, /cancelled/));
+	});
 });
 
 describe("entry opts reach the hook and status", () => {
@@ -475,21 +624,21 @@ describe("entry opts reach the hook and status", () => {
 		const { pi, commands } = fakePi({ settings: { compaction: { model: 123 } } });
 		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
 		const run = commandHandler(commands, "pi-compact");
-		const { ctx, state } = fakeCtx({ model: { reasoning: false } });
+		const { ctx, state } = fakeCtx({ model: { reasoning: false }, customKeys: ["\x1b"] });
 
 		await run("", ctx as unknown as ExtensionCommandContext);
 
 		assert.ok(notifiedWith(state, /expected a string/));
 		// The model status ("not configured") now lives in the picker title.
-		assert.equal(state.selectCalls.length, 1);
-		assert.match(state.selectCalls[0].title, /not configured/);
+		assert.equal(state.customCalls.length, 1);
+		assert.match(state.customCalls[0].render(100).join("\n"), /not configured/);
 	});
 
 	it("reports the native prompt when no override file exists", async () => {
 		const { pi, commands } = fakePi({ settings: {} });
 		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
 		const run = commandHandler(commands, "pi-compact");
-		const { ctx, state } = fakeCtx({ model: { reasoning: false } });
+		const { ctx, state } = fakeCtx({ model: { reasoning: false }, customKeys: ["\x1b"] });
 
 		await run("", ctx as unknown as ExtensionCommandContext);
 
@@ -501,7 +650,7 @@ describe("entry opts reach the hook and status", () => {
 		try {
 			const { pi, handlers, commands } = fakePi({ settings: CONFIGURED });
 			defaultExtension(pi, { promptOverridePath: overridePath, retryDelaysMs: [0, 0] });
-			const { ctx, state } = fakeCtx({ model: { reasoning: false } });
+			const { ctx, state } = fakeCtx({ model: { reasoning: false }, customKeys: ["\x1b"] });
 
 			// Status reflects the injected file.
 			await commandHandler(commands, "pi-compact")("", ctx as unknown as ExtensionCommandContext);
@@ -540,5 +689,58 @@ describe("entry opts reach the hook and status", () => {
 		assert.ok(result?.compaction);
 		assert.equal(state.streamCalls.length, 3);
 		assert.ok(elapsedMs < 1_000, `expected injected zero delays, took ${elapsedMs}ms`);
+	});
+});
+
+describe("savePermanentModel", () => {
+	function freshAgentDir(): string {
+		const dir = join(tmpdir(), `pi-compact-save-${process.pid}-${Date.now()}`);
+		mkdirSync(dir, { recursive: true });
+		return dir;
+	}
+
+	it("creates compaction.model in a missing settings file", () => {
+		const agentDir = freshAgentDir();
+
+		const result = savePermanentModel("prov/mdl", agentDir);
+
+		assert.deepEqual(result, { ok: true });
+		assert.deepEqual(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")), {
+			compaction: { model: "prov/mdl" },
+		});
+	});
+
+	it("preserves existing settings and removes the model on empty spec", () => {
+		const agentDir = freshAgentDir();
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ defaultModel: "keep", compaction: { reserveTokens: 100, model: "old/mdl" } }),
+			"utf-8",
+		);
+
+		const setResult = savePermanentModel("new/mdl", agentDir);
+		assert.deepEqual(setResult, { ok: true });
+		assert.deepEqual(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")), {
+			defaultModel: "keep",
+			compaction: { reserveTokens: 100, model: "new/mdl" },
+		});
+
+		const clearResult = savePermanentModel("", agentDir);
+		assert.deepEqual(clearResult, { ok: true });
+		assert.deepEqual(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")), {
+			defaultModel: "keep",
+			compaction: { reserveTokens: 100 },
+		});
+	});
+
+	it("reports an error instead of writing on malformed settings", () => {
+		const agentDir = freshAgentDir();
+		writeFileSync(join(agentDir, "settings.json"), "{oops", "utf-8");
+
+		const result = savePermanentModel("prov/mdl", agentDir);
+
+		assert.equal(result.ok, false);
+		assert.match(result.error, /could not read/);
+		assert.equal(readFileSync(join(agentDir, "settings.json"), "utf-8"), "{oops");
 	});
 });

@@ -45,15 +45,27 @@ export type FakeCtxOptions = {
 	scopedModels?: Array<{ model: { provider: string; id: string } }>;
 	/** Models returned by `modelRegistry.getAvailable()` when `scopedModels` is empty. */
 	available?: Array<{ provider: string; id: string }>;
-	/** `ui.select` behavior; default returns undefined (cancelled). */
-	select?: (title: string, items: string[]) => string | undefined;
+	/** `ui.editor` behavior; default returns undefined (cancelled). */
+	editor?: (title: string, prefill?: string) => string | undefined;
+	/**
+	 * Raw key data fed into the `ui.custom` component (the model picker) right
+	 * after it is created, e.g. "\r" (enter), "\x1b" (esc), "\x13" (ctrl+s),
+	 * "\x1b[B" (down arrow). Without a key the picker promise never settles.
+	 */
+	customKeys?: string[];
+};
+
+export type FakeCustomCall = {
+	/** Render the picker component at a width, for asserting its visible lines. */
+	render: (width: number) => string[];
 };
 
 export type FakeCtxState = {
 	notifications: Array<{ message: string; level: string | undefined }>;
 	findCalls: Array<{ provider: string; modelId: string }>;
 	streamCalls: Array<{ model: unknown; context: FakeChatContext; options: FakeChatOptions }>;
-	selectCalls: Array<{ title: string; items: string[]; returned: string | undefined }>;
+	customCalls: FakeCustomCall[];
+	editorCalls: Array<{ title: string; prefill: string | undefined; returned: string | undefined }>;
 };
 
 async function defaultComplete(): Promise<FakeCompletion> {
@@ -85,7 +97,7 @@ export function fakeCtx(options: FakeCtxOptions = {}) {
 	// `model` may be deliberately undefined (unknown-model case), so probe the key.
 	const model = "model" in options ? options.model : { reasoning: false };
 	const complete = options.complete ?? defaultComplete;
-	const state: FakeCtxState = { notifications: [], findCalls: [], streamCalls: [], selectCalls: [] };
+	const state: FakeCtxState = { notifications: [], findCalls: [], streamCalls: [], customCalls: [], editorCalls: [] };
 
 	const modelRegistry = {
 		find(provider: string, modelId: string) {
@@ -109,9 +121,28 @@ export function fakeCtx(options: FakeCtxOptions = {}) {
 			notify(message: string, level?: string) {
 				state.notifications.push({ message, level });
 			},
-			select(title: string, items: string[]) {
-				const returned = options.select?.(title, items);
-				state.selectCalls.push({ title, items, returned });
+			custom<T>(
+				factory: (
+					tui: { requestRender(): void },
+					theme: { fg(mode: string, text: string): string; bold(text: string): string },
+					keybindings: object,
+					done: (result: T | undefined) => void,
+				) => { render(width: number): string[]; invalidate(): void; handleInput(data: string): void },
+			): Promise<T | undefined> {
+				return new Promise<T | undefined>((resolve) => {
+					const done = (result: T | undefined) => resolve(result);
+					const fakeTheme = {
+						fg: (_mode: string, text: string) => text,
+						bold: (text: string) => text,
+					};
+					const component = factory({ requestRender() {} }, fakeTheme, {}, done);
+					state.customCalls.push({ render: (width: number) => component.render(width) });
+					for (const key of options.customKeys ?? []) component.handleInput(key);
+				});
+			},
+			editor(title: string, prefill?: string) {
+				const returned = options.editor?.(title, prefill);
+				state.editorCalls.push({ title, prefill, returned });
 				return Promise.resolve(returned);
 			},
 		},
@@ -126,6 +157,7 @@ export type FakeHandler = (event: unknown, ctx: ExtensionContext) => unknown;
 export type FakeCommand = {
 	description?: string;
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> | void;
+	getArgumentCompletions?: (argumentPrefix: string) => Array<{ value: string; label: string; description?: string }> | null;
 };
 
 /** Registers are the whole ExtensionAPI surface pi-compact uses. */

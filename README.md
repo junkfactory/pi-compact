@@ -51,17 +51,24 @@ preserves the field.
 
 ## Runtime override
 
-The `/pi-compact` command adjusts the current session without touching
-settings files:
+The `/pi-compact` command adjusts the current session; the picker can also
+persist the choice to settings:
 
 | Command | Effect |
 | --- | --- |
-| `/pi-compact` | Open an interactive model picker (session-scoped models when set, otherwise every available model; the active one is marked with `●`, plus an `off` entry). The picker title shows the current status and the prompt-override line is notified above it; Esc/cancel keeps the current state. Without a TUI (e.g. RPC mode), it prints the same status as text instead. |
+| `/pi-compact` (or `/pi-compact model`) | Open an interactive model picker (session-scoped models when set, otherwise every available model; the active one is marked with `(active)`, plus an `off` entry). The picker title shows the current status and the prompt-override line is notified above it; Esc/cancel keeps the current state. Without a TUI (e.g. RPC mode), it prints the same status as text instead. |
+| `/pi-compact prompt` | Open the prompt-override file in pi's built-in editor (Ctrl+G inside it opens your external `$EDITOR`). Missing files are prefilled with a starter template; submit saves (creating directories as needed), Esc leaves the file untouched. A saved blank override is ignored with a warning — the native prompt runs. |
 | `/pi-compact <provider/model>` | Override the compaction model for this session. The model is validated against the model registry. |
 | `/pi-compact off` | Disable interception for this session; pi's default compaction runs. |
 
-Settings edits require `/reload`; the command applies instantly. A session
+In the picker, **Enter** applies the selection for the session only, **Ctrl+S**
+saves it to `compaction.model` in the global `~/.pi/agent/settings.json`
+(Enter-style: applies immediately for the current session too, and survives
+restarts; Ctrl+S on `off` removes `compaction.model` from settings). A session
 override is reset on session start.
+
+`model`, `prompt`, and `off` autocomplete as command arguments. Settings edits
+made by hand require `/reload`; saves made via Ctrl+S apply instantly.
 
 ## Prompt override
 
