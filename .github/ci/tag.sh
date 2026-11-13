@@ -99,7 +99,9 @@ if [[ -n "${DRY_RUN:-}" ]]; then
   echo "DRY_RUN: jj tag set $TAG -r main"
   echo "DRY_RUN: jj git push --bookmark main --tag $TAG"
 else
-  npm version "$VERSION" --no-git-tag-version
+  # --allow-same-version: the initial release always ships a package.json that
+  # already carries the version being tagged.
+  npm version "$VERSION" --no-git-tag-version --allow-same-version
   # @ is non-empty (the bump): describe it first if it's the empty
   # scaffold commit, then fold the bump into it.
   if [[ "$(jj log -r @ --no-pager -T 'description')" == "" ]]; then
