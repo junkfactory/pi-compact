@@ -41,12 +41,19 @@ export type FakeCtxOptions = {
 	/** Stub returned by `modelRegistry.find`; pass `undefined` to simulate an unknown model. */
 	model?: unknown;
 	complete?: FakeComplete;
+	/** Models surfaced by the command picker (maps to `ctx.scopedModels`). */
+	scopedModels?: Array<{ model: { provider: string; id: string } }>;
+	/** Models returned by `modelRegistry.getAvailable()` when `scopedModels` is empty. */
+	available?: Array<{ provider: string; id: string }>;
+	/** `ui.select` behavior; default returns undefined (cancelled). */
+	select?: (title: string, items: string[]) => string | undefined;
 };
 
 export type FakeCtxState = {
 	notifications: Array<{ message: string; level: string | undefined }>;
 	findCalls: Array<{ provider: string; modelId: string }>;
 	streamCalls: Array<{ model: unknown; context: FakeChatContext; options: FakeChatOptions }>;
+	selectCalls: Array<{ title: string; items: string[]; returned: string | undefined }>;
 };
 
 async function defaultComplete(): Promise<FakeCompletion> {
@@ -78,7 +85,7 @@ export function fakeCtx(options: FakeCtxOptions = {}) {
 	// `model` may be deliberately undefined (unknown-model case), so probe the key.
 	const model = "model" in options ? options.model : { reasoning: false };
 	const complete = options.complete ?? defaultComplete;
-	const state: FakeCtxState = { notifications: [], findCalls: [], streamCalls: [] };
+	const state: FakeCtxState = { notifications: [], findCalls: [], streamCalls: [], selectCalls: [] };
 
 	const modelRegistry = {
 		find(provider: string, modelId: string) {
@@ -89,14 +96,23 @@ export function fakeCtx(options: FakeCtxOptions = {}) {
 			state.streamCalls.push({ model: m, context, options: opts });
 			return { result: () => complete(m, context, opts) };
 		},
+		getAvailable() {
+			return options.available ?? [];
+		},
 	};
 
 	const ctx = {
 		hasUI: options.hasUI ?? true,
 		thinkingLevel: options.thinkingLevel,
+		scopedModels: options.scopedModels ?? [],
 		ui: {
 			notify(message: string, level?: string) {
 				state.notifications.push({ message, level });
+			},
+			select(title: string, items: string[]) {
+				const returned = options.select?.(title, items);
+				state.selectCalls.push({ title, items, returned });
+				return Promise.resolve(returned);
 			},
 		},
 		modelRegistry,

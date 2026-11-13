@@ -329,13 +329,82 @@ describe("/pi-compact command", () => {
 		};
 	}
 
-	it("reports \"not configured\" when settings have no model", async () => {
+	it("opens the model picker with the model status in its title", async () => {
 		const { run, state } = setupCommand({});
 
 		await run("");
 
-		assert.equal(state.notifications.length, 2);
-		assert.ok(notifiedWith(state, /not configured/));
+		// The prompt-status line is still notified; the model status moved into the title.
+		assert.ok(notifiedWith(state, /prompt: native/));
+		assert.equal(state.selectCalls.length, 1);
+		assert.match(state.selectCalls[0].title, /not configured/);
+		assert.deepEqual(state.selectCalls[0].items, ["off — pi default compaction"]);
+		// Cancelling the picker leaves no state change.
+		assert.equal(state.streamCalls.length, 0);
+	});
+
+	it("prints text status when there is no UI", async () => {
+		const { pi, commands } = fakePi({ settings: {} });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		const run = commandHandler(commands, "pi-compact");
+		const { ctx, state } = fakeCtx({ hasUI: false, model: { reasoning: false } });
+		const logged: string[] = [];
+		const originalLog = console.log;
+		console.log = (message?: string) => {
+			if (typeof message === "string") logged.push(message);
+		};
+		try {
+			await run("", ctx as unknown as ExtensionCommandContext);
+		} finally {
+			console.log = originalLog;
+		}
+
+		assert.deepEqual(state.notifications, []);
+		assert.deepEqual(state.selectCalls, []);
+		assert.ok(logged.some((line) => /not configured/.test(line)));
+		assert.ok(logged.some((line) => /prompt: native/.test(line)));
+	});
+
+	it("picker selection sets the session override", async () => {
+		const { pi, handlers, commands } = fakePi({ settings: {} });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		const run = commandHandler(commands, "pi-compact");
+		const { ctx, state } = fakeCtx({
+			model: { reasoning: false },
+			scopedModels: [
+				{ model: { provider: "prov", id: "mdl" } },
+				{ model: { provider: "other", id: "m2" } },
+			],
+			select: (_title, items) => items[0],
+		});
+
+		await run("", ctx as unknown as ExtensionCommandContext);
+
+		assert.deepEqual(state.selectCalls[0].items, ["prov/mdl", "other/m2", "off — pi default compaction"]);
+		assert.ok(notifiedWith(state, /will use prov\/mdl/));
+
+		// The selection intercepts the next compaction.
+		const result = await compactHandler(handlers)(compactEvent(), ctx);
+		assert.ok(result?.compaction);
+		assert.deepEqual(state.findCalls.at(-1), { provider: "prov", modelId: "mdl" });
+	});
+
+	it("picker marks the active model and offers off", async () => {
+		const { pi, handlers, commands } = fakePi({ settings: CONFIGURED });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		const run = commandHandler(commands, "pi-compact");
+		const { ctx, state } = fakeCtx({
+			model: { reasoning: false },
+			scopedModels: [{ model: { provider: "prov", id: "mdl" } }],
+			select: (_title, items) => items[items.length - 1],
+		});
+
+		await run("", ctx as unknown as ExtensionCommandContext);
+
+		assert.deepEqual(state.selectCalls[0].items, ["● prov/mdl", "off — pi default compaction"]);
+		assert.ok(notifiedWith(state, /disabled for this session/));
+		assert.equal(await compactHandler(handlers)(compactEvent(), ctx), undefined);
+		assert.equal(state.streamCalls.length, 0);
 	});
 
 	it("disables interception for the session on \"off\"", async () => {
@@ -411,7 +480,9 @@ describe("entry opts reach the hook and status", () => {
 		await run("", ctx as unknown as ExtensionCommandContext);
 
 		assert.ok(notifiedWith(state, /expected a string/));
-		assert.ok(notifiedWith(state, /not configured/));
+		// The model status ("not configured") now lives in the picker title.
+		assert.equal(state.selectCalls.length, 1);
+		assert.match(state.selectCalls[0].title, /not configured/);
 	});
 
 	it("reports the native prompt when no override file exists", async () => {

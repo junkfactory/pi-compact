@@ -56,7 +56,7 @@ settings files:
 
 | Command | Effect |
 | --- | --- |
-| `/pi-compact` | Show status: active model, whether it comes from settings or the session, prompt override state, and whether interception is disabled. |
+| `/pi-compact` | Open an interactive model picker (session-scoped models when set, otherwise every available model; the active one is marked with `●`, plus an `off` entry). The picker title shows the current status and the prompt-override line is notified above it; Esc/cancel keeps the current state. Without a TUI (e.g. RPC mode), it prints the same status as text instead. |
 | `/pi-compact <provider/model>` | Override the compaction model for this session. The model is validated against the model registry. |
 | `/pi-compact off` | Disable interception for this session; pi's default compaction runs. |
 

@@ -5,6 +5,17 @@ import { readConfig } from "./settings.js";
 
 type NotifyLevel = "info" | "warning" | "error";
 
+const OFF_ITEM = "off — pi default compaction";
+
+/**
+ * Model specs offered by the picker: session-scoped models when the session has
+ * scoping (mirrors pi's built-in /model picker), otherwise every available model.
+ */
+function pickerModelSpecs(ctx: { scopedModels: readonly { model: { provider: string; id: string } }[]; modelRegistry: { getAvailable(): { provider: string; id: string }[] } }): string[] {
+	const models = ctx.scopedModels.length > 0 ? ctx.scopedModels.map((scoped) => scoped.model) : ctx.modelRegistry.getAvailable();
+	return [...new Set(models.map((model) => `${model.provider}/${model.id}`))];
+}
+
 /**
  * pi-compact entry point.
  *
@@ -43,7 +54,6 @@ export default function (
 				for (const warning of warnings) say(warning, "warning");
 				const configured = config.model;
 				const current = runtimeModel === "" ? "off (default compaction)" : runtimeModel || configured || "not configured";
-				say(`pi-compact model: ${current}`, "info");
 
 				const override = await loadPromptOverride(opts?.promptOverridePath);
 				if (override.warning) say(override.warning, "warning");
@@ -51,6 +61,30 @@ export default function (
 					say(`pi-compact prompt: override file (${opts?.promptOverridePath ?? PROMPT_OVERRIDE_PATH})`, "info");
 				}
 				else say("pi-compact prompt: native", "info");
+
+				if (!ctx.hasUI) {
+					say(`pi-compact model: ${current}`, "info");
+					return;
+				}
+
+				// Interactive: a picker mirroring pi's model list; Esc/cancel keeps
+				// the current state. The title carries the model status.
+				const items = pickerModelSpecs(ctx).map((spec) => (spec === (runtimeModel || configured) ? `● ${spec}` : spec));
+				items.push(runtimeModel === "" ? `● ${OFF_ITEM}` : OFF_ITEM);
+				const choice = await ctx.ui.select(`pi-compact compaction model — current: ${current}`, items);
+				if (choice === undefined) return;
+				const spec = choice.replace(/^● /, "");
+				if (spec.startsWith("off")) {
+					runtimeModel = "";
+					say("pi-compact disabled for this session (default compaction)", "info");
+					return;
+				}
+				if (!resolveModel(spec, ctx.modelRegistry)) {
+					say(`pi-compact: model "${spec}" not found`, "error");
+					return;
+				}
+				runtimeModel = spec;
+				say(`pi-compact will use ${spec} for this session`, "info");
 				return;
 			}
 
