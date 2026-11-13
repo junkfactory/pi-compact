@@ -1,0 +1,23 @@
+{
+  "name": "pi-compact",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "pi": { "extensions": ["./extensions/index.ts"] },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --import jiti/register --test \"test/**/*.test.ts\"",
+    "build": "echo 'nothing to build'"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "jiti": "^2.7.0",
+    "typescript": "^5.7.0",
+    "@types/node": "^24.0.0"
+  }
+}
