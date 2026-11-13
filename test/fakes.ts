@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { DEFAULT_COMPACTION_SETTINGS } from "@earendil-works/pi-coding-agent";
 import type {
+	EntryRenderer,
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
@@ -161,10 +162,18 @@ export type FakeCommand = {
 };
 
 /** Registers are the whole ExtensionAPI surface pi-compact uses. */
+export type FakePiState = {
+	settings: unknown;
+	entryRenderers: Map<string, EntryRenderer>;
+	entries: Array<{ customType: string; data?: unknown }>;
+};
+
 export function fakePi(options: { settings?: unknown } = {}) {
-	const state = { settings: options.settings };
 	const handlers = new Map<string, FakeHandler>();
 	const commands = new Map<string, FakeCommand>();
+	const entryRenderers = new Map<string, EntryRenderer>();
+	const entries: Array<{ customType: string; data?: unknown }> = [];
+	const state: FakePiState = { settings: options.settings, entryRenderers, entries };
 
 	const pi = {
 		on(event: string, handler: FakeHandler) {
@@ -179,9 +188,34 @@ export function fakePi(options: { settings?: unknown } = {}) {
 		getSettings() {
 			return state.settings;
 		},
+		registerEntryRenderer(customType: string, renderer: EntryRenderer) {
+			entryRenderers.set(customType, renderer);
+		},
+		appendEntry(customType: string, data?: unknown) {
+			entries.push({ customType, data });
+		},
 	};
 
 	return { pi: pi as unknown as ExtensionAPI, state, handlers, commands };
+}
+
+export function summaryCardRenderer(entryRenderers: Map<string, EntryRenderer>): EntryRenderer {
+	const renderer = entryRenderers.get("pi-compact");
+	assert.ok(renderer, "no pi-compact entry renderer registered");
+	return renderer;
+}
+
+/** Renders the card the way the TUI would and returns its visible lines. */
+export function renderCard(renderer: EntryRenderer, data: unknown): string[] {
+	const theme = { fg: (_role: string, text: string) => text } as never;
+	const entry = { type: "custom", customType: "pi-compact", data, id: "x", parentId: "", timestamp: "" };
+	const component = renderer(entry as never, { expanded: false } as never, theme);
+	if (!component) return [];
+	return (component as { render(width: number): string[] }).render(200);
+}
+
+export function appendEntries(state: { entries: Array<{ customType: string; data?: unknown }> }): Array<{ customType: string; data?: unknown }> {
+	return state.entries;
 }
 
 export type CompactHandler = (
@@ -193,6 +227,17 @@ export function compactHandler(handlers: Map<string, FakeHandler>): CompactHandl
 	const handler = handlers.get("session_before_compact");
 	assert.ok(handler, "no session_before_compact handler registered");
 	return async (event, ctx) => (await handler(event, ctx)) as SessionBeforeCompactResult | undefined;
+}
+
+/** Drives the `session_compact` confirmation event pi emits after saving the entry. */
+export function sessionCompactHandler(
+	handlers: Map<string, FakeHandler>,
+): (event: { fromExtension: boolean }) => void {
+	const handler = handlers.get("session_compact");
+	assert.ok(handler, "no session_compact handler registered");
+	return (event) => {
+		void handler(event, {} as ExtensionContext);
+	};
 }
 
 export function commandHandler(commands: Map<string, FakeCommand>, name: string): FakeCommand["handler"] {

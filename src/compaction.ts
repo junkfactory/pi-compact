@@ -57,11 +57,26 @@ async function withRetries<T>(
 	}
 }
 
+/** Data appended as a custom entry after a successful pi-compact summary. */
+export interface SummaryCardData {
+	model: string;
+	prompt: "native" | "override";
+	usage?: { input: number; output: number };
+}
+
+/** Custom-entry type the transcript renderer picks up; see registerEntryRenderer. */
+export const SUMMARY_ENTRY_TYPE = "pi-compact";
+
 /**
  * Registers the `session_before_compact` handler. It intercepts every compaction
  * path (manual, threshold, overflow). Any problem — no model configured, unknown
  * model, empty summary, provider error, abort — returns undefined so pi's default
  * compaction runs instead.
+ *
+ * After a successful interception it stashes which model produced the summary
+ * and, when `session_compact` confirms pi accepted the extension-provided entry,
+ * appends a durable `pi-compact` custom entry to the session so the transcript
+ * shows exactly which model ran (surviving pi's compaction re-render).
  *
  * `getRuntimeModel` returns the session override: undefined follows settings,
  * "" disables interception, anything else is a "provider/modelId" spec.
@@ -72,6 +87,15 @@ export function registerCompactionHook(
 	opts?: { promptOverridePath?: string; retryDelaysMs?: number[] },
 ): void {
 	const retryDelaysMs = opts?.retryDelaysMs ?? RETRY_DELAYS_MS;
+	let lastSummary: SummaryCardData | undefined;
+
+	pi.on("session_compact", (event) => {
+		// Only claim compactions pi actually took from us; a stale stash from a
+		// hook whose compaction never landed must never be attributed.
+		if (!event.fromExtension || !lastSummary) return;
+		pi.appendEntry(SUMMARY_ENTRY_TYPE, lastSummary);
+		lastSummary = undefined;
+	});
 	pi.on("session_before_compact", async (event, ctx) => {
 		const runtime = getRuntimeModel();
 		const { config, warnings } = readConfig(pi.getSettings());
@@ -84,12 +108,14 @@ export function registerCompactionHook(
 
 		const spec = runtime === "" ? undefined : runtime || config.model;
 		if (spec === undefined) return undefined;
+		lastSummary = undefined;
 
 		const model = resolveModel(spec, ctx.modelRegistry);
 		if (!model) {
 			if (ctx.hasUI) ctx.ui.notify(`pi-compact: model "${spec}" not found, using default compaction`, "warning");
 			return undefined;
 		}
+		lastSummary = undefined;
 
 		try {
 			const conversationText = serializeConversation(
@@ -98,6 +124,7 @@ export function registerCompactionHook(
 
 			const override = await loadPromptOverride(opts?.promptOverridePath);
 			if (override.warning && ctx.hasUI) ctx.ui.notify(override.warning, "warning");
+			lastSummary = { model: spec, prompt: override.text ? "override" : "native" };
 
 			const messages = buildSummaryMessages({
 				conversationText,
@@ -138,7 +165,10 @@ export function registerCompactionHook(
 				event.signal,
 				retryDelaysMs,
 			);
-			if (!response) return undefined;
+			if (!response) {
+				lastSummary = undefined;
+				return undefined;
+			}
 
 			// Mirror pi's native behavior: a summary that tries to call tools is a failure.
 			if (response.content.some((block) => block.type === "toolCall")) {
@@ -165,10 +195,21 @@ export function registerCompactionHook(
 				firstKeptEntryId: event.preparation.firstKeptEntryId,
 				tokensBefore: event.preparation.tokensBefore,
 			};
-			if (response.usage) compaction.usage = response.usage;
+			if (response.usage) {
+				compaction.usage = response.usage;
+				lastSummary = { ...lastSummary, usage: { input: response.usage.input, output: response.usage.output } };
+			}
+
+			// Immediate confirmation that this compaction ran through the configured
+			// model (visible in RPC clients; the durable card covers the transcript).
+			if (ctx.hasUI) {
+				const tokens = response.usage ? ` (${response.usage.input} → ${response.usage.output} tokens)` : "";
+				ctx.ui.notify(`pi-compact: summary via ${spec}${tokens}`, "info");
+			}
 
 			return { compaction };
 		} catch (error) {
+			lastSummary = undefined;
 			if (!event.signal.aborted && ctx.hasUI) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`pi-compact: compaction failed (${message}), using default compaction`, "warning");

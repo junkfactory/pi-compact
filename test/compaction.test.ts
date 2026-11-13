@@ -15,7 +15,10 @@ import {
 	compactHandler,
 	fakeCtx,
 	fakePi,
+	renderCard,
 	scriptComplete,
+	sessionCompactHandler,
+	summaryCardRenderer,
 	type FakeCtxOptions,
 	type FakeCtxState,
 } from "./fakes.js";
@@ -42,13 +45,19 @@ function setup(
 		promptOverridePath?: string;
 	} = {}
 ) {
-	const { pi, handlers } = fakePi({ settings: options.settings ?? CONFIGURED });
+	const { pi, handlers, state: piState } = fakePi({ settings: options.settings ?? CONFIGURED });
 	registerCompactionHook(pi, options.getRuntimeModel ?? (() => undefined), {
 		promptOverridePath: options.promptOverridePath ?? MISSING_OVERRIDE,
 		retryDelaysMs: [0, 0],
 	});
 	const { ctx, state } = fakeCtx(options.ctx);
-	return { handler: compactHandler(handlers), ctx, state };
+	return {
+		handler: compactHandler(handlers),
+		sessionCompact: sessionCompactHandler(handlers),
+		ctx,
+		state,
+		entries: piState.entries as Array<{ customType: string; data?: unknown }>,
+	};
 }
 
 describe("session_before_compact handler", () => {
@@ -82,6 +91,8 @@ describe("session_before_compact handler", () => {
 		assert.equal(call.options.signal, event.signal);
 		assert.equal(call.context.systemPrompt, SUMMARIZATION_SYSTEM_PROMPT);
 		assert.ok(call.context.messages[0].content[0].text.startsWith("<conversation>"));
+		assert.ok(notifiedWith(state, /summary via prov\/mdl \(1 → 2 tokens\)/));
+		assert.equal(state.notifications.find((n) => /summary via/.test(n.message))?.level, "info");
 	});
 
 	it("warns and falls back when the configured model is unknown", async () => {
@@ -172,7 +183,8 @@ describe("session_before_compact handler", () => {
 		const result = await handler(compactEvent(), ctx);
 
 		assert.equal(state.streamCalls.length, 3);
-		assert.deepEqual(state.notifications, []);
+		// No usage in the scripted response, so the confirmation carries no token counts.
+		assert.ok(notifiedWith(state, /summary via prov\/mdl/));
 		assert.ok(result?.compaction);
 		assert.equal(result.compaction.summary, "Recovered");
 	});
@@ -186,7 +198,7 @@ describe("session_before_compact handler", () => {
 		assert.match(state.notifications[0].message, /compaction failed \(boom\)/);
 	});
 
-	it("retries a provider error returned as stopReason error and recovers", async () => {
+	it("retries a provider error returned as stopReason error and recovers, confirming via notify", async () => {
 		const { handler, ctx, state } = setup({
 			ctx: {
 				complete: scriptComplete([
@@ -200,7 +212,7 @@ describe("session_before_compact handler", () => {
 		const result = await handler(compactEvent(), ctx);
 
 		assert.equal(state.streamCalls.length, 3);
-		assert.deepEqual(state.notifications, []);
+		assert.ok(notifiedWith(state, /summary via prov\/mdl/));
 		assert.equal(result?.compaction?.summary, "Recovered");
 	});
 
@@ -316,10 +328,110 @@ describe("session_before_compact handler", () => {
 		const result = await handler(compactEvent(), ctx);
 
 		assert.ok(result);
-		assert.deepEqual(state.notifications, []);
+		// Success is confirmed, not silent: exactly the one info notification.
+		assert.equal(state.notifications.length, 1);
+		assert.match(state.notifications[0].message, /summary via prov\/mdl/);
 		const call = state.streamCalls[0];
 		assert.equal(call.context.systemPrompt, SUMMARIZATION_SYSTEM_PROMPT);
 		assert.ok(call.context.messages[0].content[0].text.includes(SUMMARIZATION_PROMPT));
+	});
+});
+
+describe("summary card entry", () => {
+	it("appends a card naming the model when pi accepts the extension compaction", async () => {
+		const { handler, sessionCompact, ctx, entries } = setup();
+
+		await handler(compactEvent(), ctx);
+		sessionCompact({ fromExtension: true });
+
+		assert.equal(entries.length, 1);
+		assert.equal(entries[0].customType, "pi-compact");
+		assert.deepEqual(entries[0].data, {
+			model: "prov/mdl",
+			prompt: "native",
+			usage: { input: 1, output: 2 },
+		});
+	});
+
+	it("marks the card when the override prompt was used", async () => {
+		rmSync(PROMPT_DIR, { recursive: true, force: true });
+		mkdirSync(PROMPT_DIR, { recursive: true });
+		writeFileSync(PROMPT_PATH, "my override", "utf-8");
+		const { handler, sessionCompact, ctx, entries } = setup({ promptOverridePath: PROMPT_PATH });
+
+		await handler(compactEvent(), ctx);
+		sessionCompact({ fromExtension: true });
+
+		assert.equal(entries[0].data && (entries[0].data as { prompt: string }).prompt, "override");
+	});
+
+	it("appends nothing for native compactions", async () => {
+		const { handler, sessionCompact, ctx, entries } = setup();
+
+		await handler(compactEvent(), ctx);
+		sessionCompact({ fromExtension: false });
+
+		assert.deepEqual(entries, []);
+	});
+
+	it("appends nothing when the hook fell back and never delivered a summary", async () => {
+		const { handler, sessionCompact, ctx, entries } = setup({ settings: {} });
+
+		await handler(compactEvent(), ctx);
+		sessionCompact({ fromExtension: true });
+
+		assert.deepEqual(entries, []);
+	});
+
+	it("consumes the card on the first accepted compaction only", async () => {
+		const { handler, sessionCompact, ctx, entries } = setup();
+
+		await handler(compactEvent(), ctx);
+		sessionCompact({ fromExtension: true });
+		sessionCompact({ fromExtension: true });
+
+		assert.equal(entries.length, 1);
+	});
+});
+
+describe("summary card renderer", () => {
+	it("registers under the pi-compact entry type", () => {
+		const { pi, state } = fakePi({ settings: {} });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+
+		assert.ok(state.entryRenderers instanceof Map);
+		assert.ok(state.entryRenderers.has("pi-compact"));
+	});
+
+	it("renders the model and token counts", () => {
+		const { pi, state } = fakePi({ settings: {} });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		const lines = renderCard(summaryCardRenderer(state.entryRenderers), {
+			model: "opencode-go/beam-free",
+			prompt: "native",
+			usage: { input: 9_347, output: 4_692 },
+		});
+
+		assert.match(lines.join("\n"), /pi-compact: summary via opencode-go\/beam-free \(9,347 → 4,692 tokens\)/);
+	});
+
+	it("omits token counts when usage is missing", () => {
+		const { pi, state } = fakePi({ settings: {} });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		const lines = renderCard(summaryCardRenderer(state.entryRenderers), {
+			model: "prov/mdl",
+			prompt: "native",
+		});
+
+		assert.match(lines.join("\n"), /pi-compact: summary via prov\/mdl\s*\n/);
+	});
+
+	it("renders nothing for a card without a model", () => {
+		const { pi, state } = fakePi({ settings: {} });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		const lines = renderCard(summaryCardRenderer(state.entryRenderers), {});
+
+		assert.deepEqual(lines, []);
 	});
 });
 
@@ -544,7 +656,7 @@ describe("/pi-compact command", () => {
 
 		assert.deepEqual(
 			completions?.map((item) => item.value),
-			["model", "prompt", "off"],
+			["model", "prompt", "prompt reset", "off"],
 		);
 		// No match yields no completions.
 		assert.equal(commands.get("pi-compact")?.getArgumentCompletions?.("zzz"), null);
@@ -587,6 +699,27 @@ describe("/pi-compact command", () => {
 		assert.equal(state.editorCalls[0].prefill, "existing prompt");
 		assert.equal(readFileSync(PROMPT_PATH, "utf-8"), "existing prompt, edited");
 		assert.ok(notifiedWith(state, /saved/));
+	});
+
+	it("prompt reset removes the override file", async () => {
+		rmSync(PROMPT_DIR, { recursive: true, force: true });
+		mkdirSync(PROMPT_DIR, { recursive: true });
+		writeFileSync(PROMPT_PATH, "my override", "utf-8");
+		const { run, state } = setupCommand({}, {}, PROMPT_PATH);
+
+		await run("prompt reset");
+
+		assert.ok(!existsSync(PROMPT_PATH), "override file removed");
+		assert.ok(notifiedWith(state, /removed .*native prompt/));
+	});
+
+	it("prompt reset without a file says so", async () => {
+		rmSync(PROMPT_DIR, { recursive: true, force: true });
+		const { run, state } = setupCommand({}, {}, PROMPT_PATH);
+
+		await run("prompt reset");
+
+		assert.ok(notifiedWith(state, /no override file/));
 	});
 
 	it("prompt warns when the saved override is blank", async () => {

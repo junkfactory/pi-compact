@@ -1,15 +1,30 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { EntryRenderer, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { SelectItem } from "@earendil-works/pi-tui";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { Text, type SelectItem } from "@earendil-works/pi-tui";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { registerCompactionHook, resolveModel } from "./compaction.js";
+import { registerCompactionHook, resolveModel, SUMMARY_ENTRY_TYPE, type SummaryCardData } from "./compaction.js";
 import { pickModel } from "./picker.js";
 import { loadPromptOverride, PROMPT_OVERRIDE_PATH } from "./prompt.js";
 import { readConfig } from "./settings.js";
 import { savePermanentModel } from "./settings-write.js";
 
 type NotifyLevel = "info" | "warning" | "error";
+
+/**
+ * Durable transcript card: rendered right under pi's `[compaction]` block for
+ * every summary pi-compact produced, and persisted in the session file.
+ */
+const summaryCardRenderer: EntryRenderer<SummaryCardData> = (entry, _options, theme) => {
+	const data = entry.data;
+	if (!data?.model) return undefined;
+	const tokens = data.usage ? ` (${fmtTokens(data.usage.input)} → ${fmtTokens(data.usage.output)} tokens)` : "";
+	return new Text(theme.fg("dim", `pi-compact: summary via ${data.model}${tokens}`));
+};
+
+function fmtTokens(n: number): string {
+	return n.toLocaleString("en-US");
+}
 
 const OFF_ITEM = "off";
 const OFF_LABEL = "off — pi default compaction";
@@ -53,6 +68,8 @@ export default function (
 		retryDelaysMs: opts?.retryDelaysMs,
 	});
 
+	pi.registerEntryRenderer(SUMMARY_ENTRY_TYPE, summaryCardRenderer);
+
 	pi.registerCommand("pi-compact", {
 		description: "Configure pi-compact compaction model and prompt",
 		// Only subcommands are completed here; model specs are offered by the
@@ -61,6 +78,7 @@ export default function (
 			const items = [
 				{ value: "model", label: "model", description: "pick the compaction model" },
 				{ value: "prompt", label: "prompt", description: "edit the prompt override" },
+				{ value: "prompt reset", label: "prompt reset", description: "remove the override, back to native" },
 				{ value: "off", label: "off", description: "use pi's default compaction" },
 			];
 			const remaining = items.filter((item) => item.value.startsWith(prefix));
@@ -131,6 +149,18 @@ export default function (
 						: `pi-compact will use ${choice.spec} for this session`,
 					"info",
 					);
+				return;
+			}
+
+			if (trimmed === "prompt reset") {
+				const existed = existsSync(promptPath);
+				rmSync(promptPath, { force: true });
+				say(
+					existed
+						? `pi-compact prompt: removed ${promptPath} — the native prompt is used from the next compaction`
+						: `pi-compact prompt: no override file at ${promptPath}`,
+					"info",
+				);
 				return;
 			}
 

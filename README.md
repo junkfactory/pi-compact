@@ -58,6 +58,7 @@ persist the choice to settings:
 | --- | --- |
 | `/pi-compact` (or `/pi-compact model`) | Open an interactive model picker (session-scoped models when set, otherwise every available model; the active one is marked with `(active)`, plus an `off` entry). The picker title shows the current status and the prompt-override line is notified above it; Esc/cancel keeps the current state. Without a TUI (e.g. RPC mode), it prints the same status as text instead. |
 | `/pi-compact prompt` | Open the prompt-override file in pi's built-in editor (Ctrl+G inside it opens your external `$EDITOR`). Missing files are prefilled with a starter template; submit saves (creating directories as needed), Esc leaves the file untouched. A saved blank override is ignored with a warning — the native prompt runs. |
+| `/pi-compact prompt reset` | Delete the prompt-override file; the native prompt runs from the next compaction. This is the clean way to revert. |
 | `/pi-compact <provider/model>` | Override the compaction model for this session. The model is validated against the model registry. |
 | `/pi-compact off` | Disable interception for this session; pi's default compaction runs. |
 
@@ -67,7 +68,7 @@ saves it to `compaction.model` in the global `~/.pi/agent/settings.json`
 restarts; Ctrl+S on `off` removes `compaction.model` from settings). A session
 override is reset on session start.
 
-`model`, `prompt`, and `off` autocomplete as command arguments. Settings edits
+`model`, `prompt`, `prompt reset`, and `off` autocomplete as command arguments. Settings edits
 made by hand require `/reload`; saves made via Ctrl+S apply instantly.
 
 ## Prompt override
@@ -107,7 +108,12 @@ Omit conversational filler.
 ## Behavior & fallback
 
 The `session_before_compact` hook fires for manual, threshold, and overflow
-compaction alike. Failures of two kinds are retried up to 3 attempts with
+compaction alike. A successful interception leaves durable proof in the
+transcript: a dim `pi-compact: summary via <provider/model> (N → M tokens)`
+line rendered directly under pi's `[compaction]` block (and an info
+notification for RPC clients). The line is stored as a custom session entry,
+so it survives restarts, reloads, and tree navigation — open any old session
+and you can still see which model produced each summary. Failures of two kinds are retried up to 3 attempts with
 1s then 2s backoff (delays configurable via the extension options for
 tests): errors thrown by the summary request, and provider failures returned
 as a response with `stopReason: "error"` — in both cases the provider's own
