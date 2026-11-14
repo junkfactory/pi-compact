@@ -494,7 +494,7 @@ describe("summary card renderer", () => {
 			usage: { input: 9_347, output: 4_692 },
 		});
 
-		assert.match(lines.join("\n"), /pi-compact: summary via opencode-go\/beam-free, thinking high \(9,347 → 4,692 tokens\)/);
+		assert.match(lines.join("\n"), /pi-compact: summary via opencode-go\/beam-free @ high effort \(9,347 → 4,692 tokens\)/);
 	});
 
 	it("omits token counts when usage is missing", () => {
@@ -506,6 +506,19 @@ describe("summary card renderer", () => {
 		});
 
 		assert.match(lines.join("\n"), /pi-compact: summary via prov\/mdl\s*\n/);
+	});
+
+	it("omits the effort segment when thinking was off", () => {
+		const { pi, state } = fakePi({ settings: {} });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		const lines = renderCard(summaryCardRenderer(state.entryRenderers), {
+			model: "prov/mdl",
+			prompt: "native",
+			thinking: "off",
+		});
+
+		assert.match(lines.join("\n"), /pi-compact: summary via prov\/mdl\s*\n/);
+		assert.ok(!lines.join("\n").includes("effort"));
 	});
 
 	it("renders nothing for a card without a model", () => {
