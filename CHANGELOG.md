@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.3.0]
+
+- The `/pi-compact model` and `/pi-compact thinking` pickers gain type-to-filter fuzzy search: typing narrows the list by matching on the model spec or effort level, Enter picks from the filtered list, and the highlighted selection is retained across query refinements and zero-match gaps. PageUp/PageDown still page the list, Ctrl+S persists the filtered selection to settings, and Escape cancels.
+
 ## [0.2.0]
 
 - New `compaction.thinking` setting controls the summarizer's thinking effort (default `high`); `auto` follows the session's thinking level and `off` disables reasoning. Invalid values warn and are ignored.
