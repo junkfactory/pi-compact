@@ -160,6 +160,20 @@ export function registerCompactionHook(
 						truncated.nonRetryable = true;
 						throw truncated;
 					}
+					// A resolved "stop" response whose text channel is empty (e.g. a
+					// reasoning-only model that emitted everything into the thinking block
+					// and no text tokens) is usually transient: throw so withRetries runs
+					// the request again. A tool-call-only response is left for the
+					// dedicated tool-call check below, which warns more precisely.
+					const emptySummary = !message.content.some((block) => block.type === "toolCall") &&
+						message.content
+							.filter((block) => block.type === "text")
+							.map((block) => block.text)
+							.join("")
+							.trim() === "";
+					if (emptySummary) {
+						throw new Error("empty summary");
+					}
 					return message;
 				},
 				event.signal,
@@ -178,17 +192,13 @@ export function registerCompactionHook(
 				return undefined;
 			}
 
+			// The retry loop guarantees non-empty text: a text-less "stop" response
+			// throws "empty summary" inside the retry closure, so every response that
+			// reaches here carries at least one non-whitespace text block.
 			const summary = response.content
 				.filter((content) => content.type === "text")
 				.map((content) => content.text)
 				.join("\n");
-
-			if (summary.trim() === "") {
-				if (!event.signal.aborted && ctx.hasUI) {
-					ctx.ui.notify("pi-compact: empty summary, using default compaction", "warning");
-				}
-				return undefined;
-			}
 
 			const compaction: CompactionResult = {
 				summary,

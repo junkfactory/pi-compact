@@ -120,14 +120,34 @@ describe("session_before_compact handler", () => {
 		assert.equal(state.notifications[0].level, "warning");
 	});
 
-	it("warns and falls back on an empty summary", async () => {
+	it("retries an empty summary and returns the summary on the next attempt", async () => {
 		const { handler, ctx, state } = setup({
-			ctx: { complete: async () => ({ content: [{ type: "text", text: "   " }] }) },
+			ctx: {
+				complete: scriptComplete([
+					{ content: [{ type: "text", text: "   " }] },
+					{ content: [{ type: "text", text: "Recovered" }] },
+				]),
+			},
+		});
+
+		const result = await handler(compactEvent(), ctx);
+
+		assert.equal(state.streamCalls.length, 2);
+		assert.ok(notifiedWith(state, /summary via prov\/mdl/));
+		assert.equal(result?.compaction?.summary, "Recovered");
+	});
+
+	it("warns and falls back when every attempt returns an empty summary", async () => {
+		const { handler, ctx, state } = setup({
+			ctx: {
+				complete: scriptComplete([{ content: [{ type: "text", text: "   " }] }]),
+			},
 		});
 
 		assert.equal(await handler(compactEvent(), ctx), undefined);
+		assert.equal(state.streamCalls.length, 3);
 		assert.equal(state.notifications.length, 1);
-		assert.match(state.notifications[0].message, /empty summary/);
+		assert.match(state.notifications[0].message, /compaction failed \(empty summary\)/);
 		assert.equal(state.notifications[0].level, "warning");
 	});
 
