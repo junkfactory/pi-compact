@@ -16,7 +16,16 @@ export interface CompactConfig {
 }
 
 /** Thinking effort levels pi accepts, shared with the session's levels. */
-const THINKING_LEVELS: ReadonlySet<ThinkingLevel> = new Set(["auto", "off", "minimal", "low", "medium", "high", "xhigh"]);
+export const THINKING_LEVELS: readonly ThinkingLevel[] = [
+	"auto",
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+];
+const THINKING_LEVEL_SET: ReadonlySet<ThinkingLevel> = new Set(THINKING_LEVELS);
 
 const WARN_NOT_OBJECT = "pi-compact: ignoring settings.compaction (expected an object)";
 const WARN_MODEL_NOT_STRING = "pi-compact: ignoring compaction.model (expected a string)";
@@ -62,7 +71,7 @@ export function readConfig(settings: unknown): { config: CompactConfig; warnings
 			const trimmed = thinking.trim().toLowerCase();
 			if (trimmed === "") {
 				// Mirror model: whitespace-only means unset, not a warning.
-			} else if (THINKING_LEVELS.has(trimmed as ThinkingLevel)) {
+			} else if (THINKING_LEVEL_SET.has(trimmed as ThinkingLevel)) {
 				config.thinking = trimmed as ThinkingLevel;
 			} else {
 				warnings.push(WARN_THINKING_INVALID);

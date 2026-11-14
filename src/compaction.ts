@@ -86,7 +86,11 @@ export const SUMMARY_ENTRY_TYPE = "pi-compact";
 export function registerCompactionHook(
 	pi: ExtensionAPI,
 	getRuntimeModel: () => string | undefined,
-	opts?: { promptOverridePath?: string; retryDelaysMs?: number[] },
+	opts?: {
+		promptOverridePath?: string;
+		retryDelaysMs?: number[];
+		getRuntimeThinking?: () => string | undefined;
+	},
 ): void {
 	const retryDelaysMs = opts?.retryDelaysMs ?? RETRY_DELAYS_MS;
 	let lastSummary: SummaryCardData | undefined;
@@ -138,10 +142,13 @@ export function registerCompactionHook(
 			const chatModel = model as ChatModel;
 			// Summarizer effort defaults to high regardless of the session's
 			// chat thinking level: compaction runs unattended (threshold/
-			// overflow) and the task needs steady effort. "auto" explicitly opts
-			// into following the session's level; "off" disables reasoning.
+			// overflow) and the task needs steady effort. A session override
+			// (via /pi-compact thinking) wins; "" means off for the session.
+			// "auto" explicitly opts into following the session's level.
 			const configured = config.thinking ?? "high";
-			const thinkingLevel = configured === "auto" ? ctx.thinkingLevel : configured;
+			const sessionThinking = opts?.getRuntimeThinking?.();
+			const resolved = sessionThinking === "" ? "off" : (sessionThinking ?? configured);
+			const thinkingLevel = resolved === "auto" ? ctx.thinkingLevel : resolved;
 			const options: ChatOptions = {
 				signal: event.signal,
 				cacheRetention: "none",

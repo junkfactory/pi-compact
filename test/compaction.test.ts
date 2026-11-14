@@ -7,7 +7,7 @@ import { describe, it } from "node:test";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { registerCompactionHook } from "../src/compaction.js";
 import defaultExtension from "../src/pi-compact.js";
-import { savePermanentModel } from "../src/settings-write.js";
+import { savePermanentSetting } from "../src/settings-write.js";
 import { SUMMARIZATION_PROMPT, SUMMARIZATION_SYSTEM_PROMPT } from "../src/prompt.js";
 import {
 	commandHandler,
@@ -41,6 +41,7 @@ function setup(
 	options: {
 		settings?: unknown;
 		getRuntimeModel?: () => string | undefined;
+		getRuntimeThinking?: () => string | undefined;
 		ctx?: FakeCtxOptions;
 		promptOverridePath?: string;
 	} = {}
@@ -49,6 +50,7 @@ function setup(
 	registerCompactionHook(pi, options.getRuntimeModel ?? (() => undefined), {
 		promptOverridePath: options.promptOverridePath ?? MISSING_OVERRIDE,
 		retryDelaysMs: [0, 0],
+		getRuntimeThinking: options.getRuntimeThinking,
 	});
 	const { ctx, state } = fakeCtx(options.ctx);
 	return {
@@ -392,6 +394,42 @@ describe("session_before_compact handler", () => {
 		assert.ok(!("reasoning" in state.streamCalls[0].options));
 	});
 
+	it("session thinking override beats the settings value", async () => {
+		const { handler, ctx, state } = setup({
+			settings: { compaction: { model: "prov/mdl", thinking: "high" } },
+			getRuntimeThinking: () => "low",
+			ctx: { model: { reasoning: true }, thinkingLevel: "high" },
+		});
+
+		await handler(compactEvent(), ctx);
+
+		assert.equal(state.streamCalls[0].options.reasoning, "low");
+	});
+
+	it("an empty session thinking override forces reasoning off for the session", async () => {
+		const { handler, ctx, state } = setup({
+			settings: { compaction: { model: "prov/mdl", thinking: "high" } },
+			getRuntimeThinking: () => "",
+			ctx: { model: { reasoning: true }, thinkingLevel: "high" },
+		});
+
+		await handler(compactEvent(), ctx);
+
+		assert.ok(!("reasoning" in state.streamCalls[0].options));
+	});
+
+	it("a session thinking override of auto follows the session thinking level", async () => {
+		const { handler, ctx, state } = setup({
+			settings: { compaction: { model: "prov/mdl", thinking: "high" } },
+			getRuntimeThinking: () => "auto",
+			ctx: { model: { reasoning: true }, thinkingLevel: "medium" },
+		});
+
+		await handler(compactEvent(), ctx);
+
+		assert.equal(state.streamCalls[0].options.reasoning, "medium");
+	});
+
 	it("sends a non-empty sessionId", async () => {
 		const { handler, ctx, state } = setup();
 
@@ -545,10 +583,36 @@ describe("/pi-compact command", () => {
 		};
 	}
 
+	it("bare invocation shows the status without a picker", async () => {
+		const { run, state } = setupCommand({});
+
+		await run("");
+
+		// pi's status line replaces the previous notify, so the whole status
+		// must arrive as one multi-line message.
+		assert.equal(state.notifications.length, 1);
+		assert.match(state.notifications[0].message, /pi-compact model: not configured\n/);
+		assert.match(state.notifications[0].message, /pi-compact thinking: high \(default\)\n/);
+		assert.match(state.notifications[0].message, /\n?pi-compact prompt: native/);
+		assert.equal(state.notifications[0].level, "info");
+		assert.equal(state.customCalls.length, 0);
+	});
+
+	it("bare status carries settings warnings in its single message at warning level", async () => {
+		const { run, state } = setupCommand({ compaction: { model: 123 } });
+
+		await run("");
+
+		assert.equal(state.notifications.length, 1);
+		assert.equal(state.notifications[0].level, "warning");
+		assert.match(state.notifications[0].message, /expected a string/);
+		assert.match(state.notifications[0].message, /pi-compact model/);
+	});
+
 	it("opens the model picker with the model status in its title", async () => {
 		const { run, state } = setupCommand({}, { customKeys: ["\x1b"] });
 
-		await run("");
+		await run("model");
 
 		// The prompt-status line is still notified; the model status moved into the title.
 		assert.ok(notifiedWith(state, /prompt: native/));
@@ -578,6 +642,7 @@ describe("/pi-compact command", () => {
 		assert.deepEqual(state.customCalls, []);
 		assert.ok(logged.some((line) => /not configured/.test(line)));
 		assert.ok(logged.some((line) => /prompt: native/.test(line)));
+		assert.ok(logged.some((line) => /pi-compact thinking: high \(default\)/.test(line)));
 	});
 
 	it("picker selection sets the session override", async () => {
@@ -593,7 +658,7 @@ describe("/pi-compact command", () => {
 			customKeys: ["\r"],
 		});
 
-		await run("", ctx as unknown as ExtensionCommandContext);
+		await run("model", ctx as unknown as ExtensionCommandContext);
 
 		const rendered = state.customCalls[0].render(100).join("\n");
 		assert.match(rendered, /prov\/mdl/);
@@ -617,7 +682,7 @@ describe("/pi-compact command", () => {
 			customKeys: ["\x1b[B", "\r"],
 		});
 
-		await run("", ctx as unknown as ExtensionCommandContext);
+		await run("model", ctx as unknown as ExtensionCommandContext);
 
 		// "prov/mdl" is active (settings model) and the off entry is selectable.
 		const rendered = state.customCalls[0].render(100).join("\n");
@@ -692,7 +757,7 @@ describe("/pi-compact command", () => {
 			AGENT_DIR,
 		);
 
-		await run("");
+		await run("model");
 
 		assert.deepEqual(JSON.parse(readFileSync(SETTINGS_PATH, "utf-8")), { compaction: { model: "prov/mdl" } });
 		assert.ok(notifiedWith(state, /will use prov\/mdl \(saved to settings/));
@@ -714,7 +779,7 @@ describe("/pi-compact command", () => {
 			AGENT_DIR,
 		);
 
-		await run("");
+		await run("model");
 
 		// Only compaction.model is removed; sibling keys are preserved.
 		assert.deepEqual(JSON.parse(readFileSync(SETTINGS_PATH, "utf-8")), { defaultModel: "keep", compaction: { reserveTokens: 100 } });
@@ -723,6 +788,222 @@ describe("/pi-compact command", () => {
 		// Session is off: settings never intercept.
 		assert.equal(await handler(compactEvent(), ctx), undefined);
 		assert.equal(state.streamCalls.length, 0);
+	});
+
+	it("completes the thinking subcommand", () => {
+		const { commands } = setupCommand({});
+		const completions = commands.get("pi-compact")?.getArgumentCompletions?.("") ?? [];
+		assert.ok(completions.some((item) => item.value === "thinking"));
+	});
+
+	it("thinking picker selection sets the session override", async () => {
+		const { run, handler, ctx, state } = setupCommand(CONFIGURED, {
+			model: { reasoning: true },
+			thinkingLevel: "high",
+			customKeys: ["\x1b[B", "\x1b[B", "\x1b[B", "\r"],
+		});
+
+		await run("thinking");
+
+		const rendered = state.customCalls[0].render(100).join("\n");
+		assert.match(rendered, /pi-compact thinking — current: high \(default\)/);
+		assert.match(rendered, /auto/);
+		assert.ok(notifiedWith(state, /will think at low for this session/));
+
+		// The override intercepts the next compaction with low reasoning.
+		await handler(compactEvent(), ctx);
+		assert.equal(state.streamCalls[0].options.reasoning, "low");
+	});
+
+	it("thinking picker off disables reasoning for the session", async () => {
+		const { run, handler, ctx, state } = setupCommand(CONFIGURED, {
+			model: { reasoning: true },
+			customKeys: ["\x1b[B", "\r"],
+		});
+
+		await run("thinking");
+
+		assert.ok(notifiedWith(state, /thinking off for this session/));
+
+		// Compaction is still intercepted, but without the reasoning option.
+		await handler(compactEvent(), ctx);
+		assert.ok(!("reasoning" in state.streamCalls[0].options));
+	});
+
+	it("thinking picker escape leaves the session state unchanged", async () => {
+		const { run, handler, ctx, state } = setupCommand(CONFIGURED, {
+			model: { reasoning: true },
+			customKeys: ["\x1b"],
+		});
+
+		await run("thinking");
+
+		await handler(compactEvent(), ctx);
+		assert.equal(state.streamCalls[0].options.reasoning, "high");
+	});
+
+	it("thinking picker marks high active when nothing is configured", async () => {
+		const { run, state } = setupCommand({}, { customKeys: ["\x1b"] });
+
+		await run("thinking");
+
+		assert.match(state.customCalls[0].render(100).join("\n"), /high \(active\)/);
+	});
+
+	it("session_start clears the session thinking override", async () => {
+		const { pi, handlers, commands } = fakePi({ settings: CONFIGURED });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		const run = commandHandler(commands, "pi-compact");
+		const { ctx, state } = fakeCtx({
+			model: { reasoning: true },
+			customKeys: ["\x1b[B", "\x1b[B", "\x1b[B", "\r"],
+		});
+		const handler = compactHandler(handlers);
+
+		await run("thinking", ctx as unknown as ExtensionCommandContext);
+		await handler(compactEvent(), ctx);
+		assert.equal(state.streamCalls[0].options.reasoning, "low");
+
+		const sessionStart = handlers.get("session_start");
+		assert.ok(sessionStart, "no session_start handler registered");
+		await sessionStart({ type: "session_start" }, ctx);
+		await handler(compactEvent(), ctx);
+		assert.equal(state.streamCalls[1].options.reasoning, "high");
+	});
+
+	it("thinking ctrl+s saves the selection to settings and applies this session", async () => {
+		rmSync(AGENT_DIR, { recursive: true, force: true });
+		mkdirSync(AGENT_DIR, { recursive: true });
+		const { run, handler, ctx, state } = setupCommand(
+			CONFIGURED,
+			{ model: { reasoning: true }, thinkingLevel: "medium", customKeys: ["\x13"] },
+			MISSING_OVERRIDE,
+			AGENT_DIR,
+		);
+
+		await run("thinking");
+
+		// The scratch settings file starts empty, so only thinking is written;
+		// sibling-key preservation is covered by the savePermanentSetting tests.
+		assert.deepEqual(JSON.parse(readFileSync(SETTINGS_PATH, "utf-8")), {
+			compaction: { thinking: "auto" },
+		});
+		assert.ok(notifiedWith(state, /will think at auto \(saved to settings/));
+
+		// Applies to the current session immediately; "auto" follows the
+		// session's thinking level.
+		await handler(compactEvent(), ctx);
+		assert.equal(state.streamCalls[0].options.reasoning, "medium");
+	});
+
+	it("thinking ctrl+s on the off entry persists compaction.thinking as off", async () => {
+		rmSync(AGENT_DIR, { recursive: true, force: true });
+		mkdirSync(AGENT_DIR, { recursive: true });
+		writeFileSync(SETTINGS_PATH, JSON.stringify({ defaultModel: "keep", compaction: { reserveTokens: 100, thinking: "low" } }), "utf-8");
+		const { run, handler, ctx, state } = setupCommand(
+			CONFIGURED,
+			{ model: { reasoning: true }, customKeys: ["\x1b[B", "\x13"] },
+			MISSING_OVERRIDE,
+			AGENT_DIR,
+		);
+
+		await run("thinking");
+
+		// "off" is a valid persisted level; only compaction.thinking is replaced.
+		assert.deepEqual(JSON.parse(readFileSync(SETTINGS_PATH, "utf-8")), {
+			defaultModel: "keep",
+			compaction: { reserveTokens: 100, thinking: "off" },
+		});
+		assert.ok(notifiedWith(state, /thinking off \(settings updated/));
+
+		await handler(compactEvent(), ctx);
+		assert.ok(!("reasoning" in state.streamCalls[0].options));
+	});
+
+	it("prints the thinking status when there is no UI", async () => {
+		const { run, state } = setupCommand(CONFIGURED, { hasUI: false });
+		const logged: string[] = [];
+		const originalLog = console.log;
+		console.log = (message?: string) => {
+			if (typeof message === "string") logged.push(message);
+		};
+		try {
+			await run("thinking");
+		} finally {
+			console.log = originalLog;
+		}
+
+		assert.deepEqual(state.notifications, []);
+		assert.deepEqual(state.customCalls, []);
+		assert.ok(logged.some((line) => /pi-compact thinking: high \(default\)/.test(line)));
+	});
+
+	it("prints the configured thinking level in the model status when there is no UI", async () => {
+		const { pi, commands } = fakePi({ settings: { compaction: { model: "prov/mdl", thinking: "low" } } });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		const run = commandHandler(commands, "pi-compact");
+		const { ctx, state } = fakeCtx({ hasUI: false, model: { reasoning: false } });
+		const logged: string[] = [];
+		const originalLog = console.log;
+		console.log = (message?: string) => {
+			if (typeof message === "string") logged.push(message);
+		};
+		try {
+			await run("model", ctx as unknown as ExtensionCommandContext);
+		} finally {
+			console.log = originalLog;
+		}
+
+		assert.deepEqual(state.customCalls, []);
+		assert.ok(logged.some((line) => /pi-compact thinking: low$/.test(line)));
+		assert.ok(!logged.some((line) => /pi-compact thinking: high/.test(line)));
+	});
+
+	it("marks the off entry active in the thinking picker when the session is off", async () => {
+		const { pi, handlers, commands } = fakePi({ settings: { compaction: { model: "prov/mdl", thinking: "low" } } });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		const run = commandHandler(commands, "pi-compact");
+		const turnOff = fakeCtx({ model: { reasoning: true }, customKeys: ["\x1b[B", "\r"] });
+		await run("thinking", turnOff.ctx as unknown as ExtensionCommandContext);
+
+		const reopened = fakeCtx({ model: { reasoning: true }, customKeys: ["\x1b"] });
+		await run("thinking", reopened.ctx as unknown as ExtensionCommandContext);
+
+		const rendered = reopened.state.customCalls[0].render(100).join("\n");
+		assert.match(rendered, /off \(active\)/);
+		assert.doesNotMatch(rendered, /low \(active\)/);
+		// The title reports the session-off state with the settings fallback.
+		assert.match(rendered, /current: off \(default low\)/);
+
+		// Reopening the picker in the session-off state leaves reasoning off.
+		await compactHandler(handlers)(compactEvent(), reopened.ctx);
+		assert.ok(!("reasoning" in reopened.state.streamCalls[0].options));
+	});
+
+	it("reports the effective fallback when the session thinking is off", async () => {
+		const { pi, commands } = fakePi({ settings: { compaction: { model: "prov/mdl", thinking: "low" } } });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		const run = commandHandler(commands, "pi-compact");
+		const turnOff = fakeCtx({ model: { reasoning: true }, customKeys: ["\x1b[B", "\r"] });
+		await run("thinking", turnOff.ctx as unknown as ExtensionCommandContext);
+
+		const status = fakeCtx({ model: { reasoning: true } });
+		await run("", status.ctx as unknown as ExtensionCommandContext);
+
+		assert.ok(notifiedWith(status.state, /pi-compact thinking: off \(default low\)/));
+	});
+
+	it("reports off with the built-in default when no settings thinking is configured", async () => {
+		const { pi, commands } = fakePi({ settings: {} });
+		defaultExtension(pi, { promptOverridePath: MISSING_OVERRIDE });
+		const run = commandHandler(commands, "pi-compact");
+		const turnOff = fakeCtx({ model: { reasoning: true }, customKeys: ["\x1b[B", "\r"] });
+		await run("thinking", turnOff.ctx as unknown as ExtensionCommandContext);
+
+		const status = fakeCtx({ model: { reasoning: true } });
+		await run("", status.ctx as unknown as ExtensionCommandContext);
+
+		assert.ok(notifiedWith(status.state, /pi-compact thinking: off \(default high\)/));
 	});
 
 	it("reports an error when the settings file is malformed", async () => {
@@ -736,7 +1017,7 @@ describe("/pi-compact command", () => {
 			AGENT_DIR,
 		);
 
-		await run("");
+		await run("model");
 
 		assert.ok(notifiedWith(state, /could not read .*settings\.json/));
 		assert.equal(state.notifications.find((n) => /could not read/.test(n.message))?.level, "error");
@@ -751,7 +1032,7 @@ describe("/pi-compact command", () => {
 
 		assert.deepEqual(
 			completions?.map((item) => item.value),
-			["model", "prompt", "prompt reset", "off"],
+			["model", "thinking", "prompt", "prompt reset", "off"],
 		);
 		// No match yields no completions.
 		assert.equal(commands.get("pi-compact")?.getArgumentCompletions?.("zzz"), null);
@@ -854,7 +1135,7 @@ describe("entry opts reach the hook and status", () => {
 		const run = commandHandler(commands, "pi-compact");
 		const { ctx, state } = fakeCtx({ model: { reasoning: false }, customKeys: ["\x1b"] });
 
-		await run("", ctx as unknown as ExtensionCommandContext);
+		await run("model", ctx as unknown as ExtensionCommandContext);
 
 		assert.ok(notifiedWith(state, /expected a string/));
 		// The model status ("not configured") now lives in the picker title.
@@ -882,7 +1163,7 @@ describe("entry opts reach the hook and status", () => {
 
 			// Status reflects the injected file.
 			await commandHandler(commands, "pi-compact")("", ctx as unknown as ExtensionCommandContext);
-			assert.ok(notifiedWith(state, /prompt: override file/));
+			assert.ok(notifiedWith(state, new RegExp(`prompt: ${overridePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`)));
 
 			// The hook builds the summary prompt from the injected file, not the native one.
 			const result = await compactHandler(handlers)(compactEvent(), ctx);
@@ -920,7 +1201,7 @@ describe("entry opts reach the hook and status", () => {
 	});
 });
 
-describe("savePermanentModel", () => {
+describe("savePermanentSetting", () => {
 	function freshAgentDir(): string {
 		const dir = join(tmpdir(), `pi-compact-save-${process.pid}-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });
@@ -930,7 +1211,7 @@ describe("savePermanentModel", () => {
 	it("creates compaction.model in a missing settings file", () => {
 		const agentDir = freshAgentDir();
 
-		const result = savePermanentModel("prov/mdl", agentDir);
+		const result = savePermanentSetting("model", "prov/mdl", agentDir);
 
 		assert.deepEqual(result, { ok: true });
 		assert.deepEqual(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")), {
@@ -946,14 +1227,14 @@ describe("savePermanentModel", () => {
 			"utf-8",
 		);
 
-		const setResult = savePermanentModel("new/mdl", agentDir);
+		const setResult = savePermanentSetting("model", "new/mdl", agentDir);
 		assert.deepEqual(setResult, { ok: true });
 		assert.deepEqual(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")), {
 			defaultModel: "keep",
 			compaction: { reserveTokens: 100, model: "new/mdl" },
 		});
 
-		const clearResult = savePermanentModel("", agentDir);
+		const clearResult = savePermanentSetting("model", "", agentDir);
 		assert.deepEqual(clearResult, { ok: true });
 		assert.deepEqual(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")), {
 			defaultModel: "keep",
@@ -961,11 +1242,28 @@ describe("savePermanentModel", () => {
 		});
 	});
 
+	it("writes and clears compaction.thinking while preserving compaction.model", () => {
+		const agentDir = freshAgentDir();
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ compaction: { model: "prov/mdl" } }), "utf-8");
+
+		const setResult = savePermanentSetting("thinking", "low", agentDir);
+		assert.deepEqual(setResult, { ok: true });
+		assert.deepEqual(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")), {
+			compaction: { model: "prov/mdl", thinking: "low" },
+		});
+
+		const clearResult = savePermanentSetting("thinking", "", agentDir);
+		assert.deepEqual(clearResult, { ok: true });
+		assert.deepEqual(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")), {
+			compaction: { model: "prov/mdl" },
+		});
+	});
+
 	it("reports an error instead of writing on malformed settings", () => {
 		const agentDir = freshAgentDir();
 		writeFileSync(join(agentDir, "settings.json"), "{oops", "utf-8");
 
-		const result = savePermanentModel("prov/mdl", agentDir);
+		const result = savePermanentSetting("model", "prov/mdl", agentDir);
 
 		assert.equal(result.ok, false);
 		assert.match(result.error, /could not read/);

@@ -6,8 +6,8 @@ import { dirname } from "node:path";
 import { registerCompactionHook, resolveModel, SUMMARY_ENTRY_TYPE, type SummaryCardData } from "./compaction.js";
 import { pickModel } from "./picker.js";
 import { loadPromptOverride, PROMPT_OVERRIDE_PATH } from "./prompt.js";
-import { readConfig } from "./settings.js";
-import { savePermanentModel } from "./settings-write.js";
+import { readConfig, THINKING_LEVELS } from "./settings.js";
+import { savePermanentSetting } from "./settings-write.js";
 
 type NotifyLevel = "info" | "warning" | "error";
 
@@ -57,16 +57,21 @@ export default function (
 	// Session runtime override: undefined = follow settings compaction.model,
 	// "" = off (pi's default compaction), otherwise "provider/modelId".
 	let runtimeModel: string | undefined;
+	// Session runtime thinking: undefined = follow settings compaction.thinking
+	// (default high), "" = off (no reasoning), otherwise a thinking level.
+	let runtimeThinking: string | undefined;
 	const promptPath = opts?.promptOverridePath ?? PROMPT_OVERRIDE_PATH;
 	const agentDir = opts?.agentDir ?? getAgentDir();
 
 	pi.on("session_start", () => {
 		runtimeModel = undefined;
+		runtimeThinking = undefined;
 	});
 
 	registerCompactionHook(pi, () => runtimeModel, {
 		promptOverridePath: promptPath,
 		retryDelaysMs: opts?.retryDelaysMs,
+		getRuntimeThinking: () => runtimeThinking,
 	});
 
 	pi.registerEntryRenderer(SUMMARY_ENTRY_TYPE, summaryCardRenderer);
@@ -78,6 +83,7 @@ export default function (
 		getArgumentCompletions: (prefix) => {
 			const items = [
 				{ value: "model", label: "model", description: "pick the compaction model" },
+				{ value: "thinking", label: "thinking", description: "pick the summarizer thinking effort" },
 				{ value: "prompt", label: "prompt", description: "edit the prompt override" },
 				{ value: "prompt reset", label: "prompt reset", description: "remove the override, back to native" },
 				{ value: "off", label: "off", description: "use pi's default compaction" },
@@ -90,10 +96,38 @@ export default function (
 				if (ctx.hasUI) ctx.ui.notify(msg, level);
 				else console.log(msg);
 			};
+			// Effective thinking effort for display: session override wins, then
+			// settings, then the built-in default.
+			const thinkingCurrent = (configured?: string) =>
+				runtimeThinking === "" ? `off (default ${configured ?? "high"})` : runtimeThinking || configured || "high (default)";
 
 			const trimmed = args.trim();
 
-			if (trimmed === "" || trimmed === "model") {
+			if (trimmed === "") {
+				// Bare invocation: a status display, no picker. pi's status line
+				// shows only the latest notify, so all lines go out as one message.
+				const { config, warnings } = readConfig(pi.getSettings());
+				const current = runtimeModel === "" ? "off (default compaction)" : runtimeModel || config.model || "not configured";
+
+				const override = await loadPromptOverride(promptPath);
+				const promptLine = override.warning
+					? override.warning
+					: override.text
+						? `pi-compact prompt: ${promptPath}`
+						: "pi-compact prompt: native";
+				say(
+					[
+						...warnings,
+						`pi-compact model: ${current}`,
+						`pi-compact thinking: ${thinkingCurrent(config.thinking)}`,
+						promptLine,
+					].join("\n"),
+					warnings.length > 0 || override.warning ? "warning" : "info",
+				);
+				return;
+			}
+
+			if (trimmed === "model") {
 				const { config, warnings } = readConfig(pi.getSettings());
 				for (const warning of warnings) say(warning, "warning");
 				const configured = config.model;
@@ -101,11 +135,12 @@ export default function (
 
 				const override = await loadPromptOverride(promptPath);
 				if (override.warning) say(override.warning, "warning");
-				else if (override.text) say(`pi-compact prompt: override file (${promptPath})`, "info");
+				else if (override.text) say(`pi-compact prompt: ${promptPath}`, "info");
 				else say("pi-compact prompt: native", "info");
 
 				if (!ctx.hasUI) {
 					say(`pi-compact model: ${current}`, "info");
+					say(`pi-compact thinking: ${thinkingCurrent(config.thinking)}`, "info");
 					return;
 				}
 
@@ -121,7 +156,7 @@ export default function (
 				if (choice === undefined) return;
 
 				if (choice.permanent) {
-					const result = savePermanentModel(choice.spec === OFF_ITEM ? "" : choice.spec, agentDir);
+					const result = savePermanentSetting("model", choice.spec === OFF_ITEM ? "" : choice.spec, agentDir);
 					if (!result.ok) {
 						say(`pi-compact: ${result.error}`, "error");
 						return;
@@ -150,6 +185,57 @@ export default function (
 						: `pi-compact will use ${choice.spec} for this session`,
 					"info",
 					);
+				return;
+			}
+
+			if (trimmed === "thinking") {
+				const { config, warnings } = readConfig(pi.getSettings());
+				for (const warning of warnings) say(warning, "warning");
+				const current = thinkingCurrent(config.thinking);
+
+				if (!ctx.hasUI) {
+					say(`pi-compact thinking: ${current}`, "info");
+					return;
+				}
+
+				// Interactive: the same picker the model branch uses; Esc/cancel
+				// keeps the current state. The title carries the effort status.
+				const active = runtimeThinking === "" ? "off" : runtimeThinking || config.thinking || "high";
+				const items: SelectItem[] = THINKING_LEVELS.map((level) => ({
+					value: level,
+					label: level === active ? `${level} (active)` : level,
+				}));
+				const choice = await pickModel(ctx, items, `pi-compact thinking — current: ${current}`);
+				if (choice === undefined) return;
+
+				if (choice.permanent) {
+					// "off" is a valid persisted level (readConfig accepts it), so it is
+				// written literally — only the model field uses "" = unset.
+				const result = savePermanentSetting("thinking", choice.spec, agentDir);
+					if (!result.ok) {
+						say(`pi-compact: ${result.error}`, "error");
+						return;
+					}
+				}
+
+				if (choice.spec === "off") {
+					runtimeThinking = "";
+					say(
+						choice.permanent
+							? "pi-compact thinking off (settings updated; the summarizer runs without reasoning)"
+							: "pi-compact thinking off for this session",
+						"info",
+					);
+					return;
+				}
+
+				runtimeThinking = choice.spec;
+				say(
+					choice.permanent
+						? `pi-compact will think at ${choice.spec} (saved to settings, applies immediately)`
+						: `pi-compact will think at ${choice.spec} for this session`,
+					"info",
+				);
 				return;
 			}
 
