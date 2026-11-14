@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0]
+
+- New `compaction.thinking` setting controls the summarizer's thinking effort (default `high`); `auto` follows the session's thinking level and `off` disables reasoning. Invalid values warn and are ignored.
+- `/pi-compact thinking` opens a picker over the same effort levels (Esc keeps the current state); Enter applies for the session, Ctrl+S persists it to settings. Picking `off` permanently keeps `compaction.thinking: "off"` in settings — a session-only `off` reverts to the configured default on the next session. Bare `/pi-compact` shows the combined model, thinking, and prompt status, with settings warnings surfaced in the same message.
+- The summary card records the resolved effort, rendered as e.g. `@ high effort`.
+- Empty summaries are retried instead of falling back to pi's default compaction immediately.
+
 ## [0.1.0]
 
 - Initial release: route every pi compaction (manual, threshold, overflow) to a model configured as `compaction.model` in settings, with an optional prompt override at `~/.pi/agent/extensions/pi-compact.md` and fallback to pi's default compaction on any failure.
