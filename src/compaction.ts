@@ -134,13 +134,16 @@ export function registerCompactionHook(
 			});
 
 			const chatModel = model as ChatModel;
-			const thinkingLevel = ctx.thinkingLevel;
+			// Summarizer effort is independent of the session's chat thinking
+			// level: compaction runs unattended (threshold/overflow) and the task
+			// needs steady effort regardless of how hard the agent is chatting.
+			const thinkingLevel = config.thinking ?? "high";
 			const options: ChatOptions = {
 				signal: event.signal,
 				cacheRetention: "none",
 				sessionId: uuidv7(),
 			};
-			if (chatModel.reasoning && thinkingLevel && thinkingLevel !== "off") {
+			if (chatModel.reasoning && thinkingLevel !== "off") {
 				options.reasoning = thinkingLevel;
 			}
 

@@ -314,9 +314,9 @@ describe("session_before_compact handler", () => {
 		assert.equal(state.notifications[0].level, "warning");
 	});
 
-	it("propagates thinkingLevel as reasoning for reasoning models", async () => {
+	it("defaults to high reasoning for reasoning models, ignoring the session thinking level", async () => {
 		const { handler, ctx, state } = setup({
-			ctx: { model: { reasoning: true }, thinkingLevel: "high" },
+			ctx: { model: { reasoning: true }, thinkingLevel: "low" },
 		});
 
 		await handler(compactEvent(), ctx);
@@ -324,8 +324,33 @@ describe("session_before_compact handler", () => {
 		assert.equal(state.streamCalls[0].options.reasoning, "high");
 	});
 
-	it("omits the reasoning option when thinkingLevel is unset", async () => {
-		const { handler, ctx, state } = setup({ ctx: { model: { reasoning: true } } });
+	it("uses the configured compaction.thinking as reasoning", async () => {
+		const { handler, ctx, state } = setup({
+			settings: { compaction: { model: "prov/mdl", thinking: "low" } },
+			ctx: { model: { reasoning: true }, thinkingLevel: "high" },
+		});
+
+		await handler(compactEvent(), ctx);
+
+		assert.equal(state.streamCalls[0].options.reasoning, "low");
+	});
+
+	it("omits the reasoning option when compaction.thinking is off", async () => {
+		const { handler, ctx, state } = setup({
+			settings: { compaction: { model: "prov/mdl", thinking: "off" } },
+			ctx: { model: { reasoning: true }, thinkingLevel: "high" },
+		});
+
+		await handler(compactEvent(), ctx);
+
+		assert.ok(!("reasoning" in state.streamCalls[0].options));
+	});
+
+	it("omits the reasoning option for non-reasoning models regardless of thinking config", async () => {
+		const { handler, ctx, state } = setup({
+			settings: { compaction: { model: "prov/mdl", thinking: "high" } },
+			ctx: { model: { reasoning: false }, thinkingLevel: "high" },
+		});
 
 		await handler(compactEvent(), ctx);
 
