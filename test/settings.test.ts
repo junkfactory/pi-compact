@@ -50,7 +50,7 @@ describe("readConfig", () => {
 	});
 
 	it("accepts every documented thinking level and normalizes case", () => {
-		for (const level of ["off", "minimal", "low", "medium", "high", "xhigh"]) {
+		for (const level of ["auto", "off", "minimal", "low", "medium", "high", "xhigh"]) {
 			const { config, warnings } = readConfig({ compaction: { thinking: level.toUpperCase() } });
 			assert.deepEqual(config, { thinking: level });
 			assert.deepEqual(warnings, []);

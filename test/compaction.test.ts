@@ -335,6 +335,39 @@ describe("session_before_compact handler", () => {
 		assert.equal(state.streamCalls[0].options.reasoning, "low");
 	});
 
+	it("follows the session thinking level when compaction.thinking is auto", async () => {
+		const { handler, ctx, state } = setup({
+			settings: { compaction: { model: "prov/mdl", thinking: "auto" } },
+			ctx: { model: { reasoning: true }, thinkingLevel: "medium" },
+		});
+
+		await handler(compactEvent(), ctx);
+
+		assert.equal(state.streamCalls[0].options.reasoning, "medium");
+	});
+
+	it("omits the reasoning option when thinking is auto and the session level is off", async () => {
+		const { handler, ctx, state } = setup({
+			settings: { compaction: { model: "prov/mdl", thinking: "auto" } },
+			ctx: { model: { reasoning: true }, thinkingLevel: "off" },
+		});
+
+		await handler(compactEvent(), ctx);
+
+		assert.ok(!("reasoning" in state.streamCalls[0].options));
+	});
+
+	it("omits the reasoning option when thinking is auto and the session level is unset", async () => {
+		const { handler, ctx, state } = setup({
+			settings: { compaction: { model: "prov/mdl", thinking: "auto" } },
+			ctx: { model: { reasoning: true } },
+		});
+
+		await handler(compactEvent(), ctx);
+
+		assert.ok(!("reasoning" in state.streamCalls[0].options));
+	});
+
 	it("omits the reasoning option when compaction.thinking is off", async () => {
 		const { handler, ctx, state } = setup({
 			settings: { compaction: { model: "prov/mdl", thinking: "off" } },

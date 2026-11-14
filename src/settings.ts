@@ -3,12 +3,12 @@
  *
  * pi-compact extends pi's native `compaction` settings object with `model`
  * (which summarizer model to use) and `thinking` (summarizer thinking effort,
- * independent of the session's chat thinking level). Only those fields are
- * read here; every other field under `compaction` belongs to pi and is
- * ignored.
+ * usually independent of the session's chat thinking level; `"auto"` opts
+ * into following the session's level). Only those fields are read here; every
+ * other field under `compaction` belongs to pi and is ignored.
  */
 
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ThinkingLevel = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export interface CompactConfig {
 	model?: string;
@@ -16,13 +16,13 @@ export interface CompactConfig {
 }
 
 /** Thinking effort levels pi accepts, shared with the session's levels. */
-const THINKING_LEVELS: ReadonlySet<ThinkingLevel> = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const THINKING_LEVELS: ReadonlySet<ThinkingLevel> = new Set(["auto", "off", "minimal", "low", "medium", "high", "xhigh"]);
 
 const WARN_NOT_OBJECT = "pi-compact: ignoring settings.compaction (expected an object)";
 const WARN_MODEL_NOT_STRING = "pi-compact: ignoring compaction.model (expected a string)";
 const WARN_THINKING_NOT_STRING = "pi-compact: ignoring compaction.thinking (expected a string)";
 const WARN_THINKING_INVALID =
-	"pi-compact: ignoring compaction.thinking (expected one of: off, minimal, low, medium, high, xhigh)";
+	"pi-compact: ignoring compaction.thinking (expected one of: auto, off, minimal, low, medium, high, xhigh)";
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
