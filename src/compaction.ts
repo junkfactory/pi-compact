@@ -61,6 +61,8 @@ async function withRetries<T>(
 export interface SummaryCardData {
 	model: string;
 	prompt: "native" | "override";
+	/** Resolved thinking effort actually used; "off" when reasoning was omitted. */
+	thinking?: string;
 	usage?: { input: number; output: number };
 }
 
@@ -148,6 +150,7 @@ export function registerCompactionHook(
 			if (chatModel.reasoning && thinkingLevel && thinkingLevel !== "off") {
 				options.reasoning = thinkingLevel as ChatOptions["reasoning"];
 			}
+			if (lastSummary) lastSummary.thinking = options.reasoning ?? "off";
 
 			const response = await withRetries(
 				async () => {

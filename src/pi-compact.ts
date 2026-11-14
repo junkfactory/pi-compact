@@ -18,8 +18,9 @@ type NotifyLevel = "info" | "warning" | "error";
 const summaryCardRenderer: EntryRenderer<SummaryCardData> = (entry, _options, theme) => {
 	const data = entry.data;
 	if (!data?.model) return undefined;
+	const thinking = data.thinking ? `, thinking ${data.thinking}` : "";
 	const tokens = data.usage ? ` (${fmtTokens(data.usage.input)} → ${fmtTokens(data.usage.output)} tokens)` : "";
-	return new Text(theme.fg("dim", `pi-compact: summary via ${data.model}${tokens}`));
+	return new Text(theme.fg("dim", `pi-compact: summary via ${data.model}${thinking}${tokens}`));
 };
 
 function fmtTokens(n: number): string {

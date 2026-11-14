@@ -315,13 +315,15 @@ describe("session_before_compact handler", () => {
 	});
 
 	it("defaults to high reasoning for reasoning models, ignoring the session thinking level", async () => {
-		const { handler, ctx, state } = setup({
+		const { handler, sessionCompact, ctx, state, entries } = setup({
 			ctx: { model: { reasoning: true }, thinkingLevel: "low" },
 		});
 
 		await handler(compactEvent(), ctx);
+		sessionCompact({ fromExtension: true });
 
 		assert.equal(state.streamCalls[0].options.reasoning, "high");
+		assert.equal((entries[0].data as { thinking?: string }).thinking, "high");
 	});
 
 	it("uses the configured compaction.thinking as reasoning", async () => {
@@ -427,6 +429,7 @@ describe("summary card entry", () => {
 		assert.deepEqual(entries[0].data, {
 			model: "prov/mdl",
 			prompt: "native",
+			thinking: "off",
 			usage: { input: 1, output: 2 },
 		});
 	});
@@ -487,10 +490,11 @@ describe("summary card renderer", () => {
 		const lines = renderCard(summaryCardRenderer(state.entryRenderers), {
 			model: "opencode-go/beam-free",
 			prompt: "native",
+			thinking: "high",
 			usage: { input: 9_347, output: 4_692 },
 		});
 
-		assert.match(lines.join("\n"), /pi-compact: summary via opencode-go\/beam-free \(9,347 → 4,692 tokens\)/);
+		assert.match(lines.join("\n"), /pi-compact: summary via opencode-go\/beam-free, thinking high \(9,347 → 4,692 tokens\)/);
 	});
 
 	it("omits token counts when usage is missing", () => {
